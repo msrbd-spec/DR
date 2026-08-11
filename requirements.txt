@@ -1,0 +1,38 @@
+# Recommended Python Version: Python 3.12 (Matches your running processes)
+#
+# ==============================================================================
+# STEP-BY-STEP ENVIRONMENT SETUP INSTRUCTIONS (For WSL / Ubuntu with RTX 4070 Super)
+# ==============================================================================
+# 
+# 1. Create a new Conda environment specifically for Python 3.12:
+#    conda create -n dr_iccit python=3.12 -y
+#
+# 2. Activate the new environment:
+#    conda activate dr_iccit
+#
+# 3. Install PyTorch + CUDA. 
+#    *NOTE: Your system has CUDA 13.2 drivers, which are backwards-compatible with 
+#    PyTorch's cu124 (CUDA 12.4) binaries. You MUST install torch via their index
+#    first so pip doesn't accidentally grab the CPU-only version!
+#    Run this exact command:
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# 4. Install the rest of the research codebase requirements listed below:
+#    pip install -r requirements.txt
+#
+# ==============================================================================
+
+# Model Backbone & Vision libraries
+timm>=1.0.0
+albumentations>=1.4.0
+opencv-python>=4.9.0
+
+# Data Science & Utilities
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+pandas>=2.2.0
+pyyaml>=6.0
+tqdm>=4.66.0
+
+# Explainable AI
+grad-cam>=1.5.0

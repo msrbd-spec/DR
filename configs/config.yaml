@@ -1,0 +1,25 @@
+img_size: 384
+batch_size: 4
+accumulation_steps: 4
+lr: 1.0e-4
+backbone_lr_mult: 0.1  # backbone (pretrained) trains at lr * this; head trains at lr
+weight_decay: 0.05
+drop_path_rate: 0.2   # stochastic depth inside the Swin backbone
+label_smoothing: 0.05
+use_tta: True          # horizontal-flip averaging at test/external_validation time
+epochs: 50
+patience: 10
+
+dataset_paths:
+  train_images: "datasets/APTOS_19/train_images"
+  train_csv: "datasets/APTOS_19/train_1.csv"
+  val_images: "datasets/APTOS_19/val_images"
+  val_csv: "datasets/APTOS_19/valid.csv"
+  test_images: "datasets/APTOS_19/test_images"
+  test_csv: "datasets/APTOS_19/test.csv"
+  external_images: "datasets/Messidor_2/images"
+  external_csv: "datasets/Messidor_2/messidor_data.csv"
+
+# Ablation flags
+use_msda: True
+use_hff: True
