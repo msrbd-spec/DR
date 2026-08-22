@@ -1,3 +1,8 @@
+import os
+# Force HuggingFace to use local cache only — no network requests (cluster has no internet)
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+
 import torch
 from src.models.dr_model import ICCIT_DR_Net
 import sys
@@ -15,15 +20,38 @@ def run_tests():
     
     for name, use_msda, use_hff in ablations:
         try:
-            model = ICCIT_DR_Net(use_msda=use_msda, use_hff=use_hff, num_classes=5)
+            model = ICCIT_DR_Net(use_msda=use_msda, use_hff=use_hff, num_classes=5, use_ordinal=True)
             out = model(dummy_input)
-            assert out.shape == (2, 5), f"Shape mismatch for {name}: expected (2, 5), got {out.shape}"
-            print(f"[OK] {name.upper()}: Output shape {out.shape}")
+            
+            # New model returns dict with 'logits' and 'ordinal_logits'
+            assert isinstance(out, dict), f"Output should be dict, got {type(out)}"
+            assert out['logits'].shape == (2, 5), f"Logits shape mismatch for {name}: expected (2, 5), got {out['logits'].shape}"
+            assert out['ordinal_logits'].shape == (2, 4), f"Ordinal logits shape mismatch for {name}: expected (2, 4), got {out['ordinal_logits'].shape}"
+            print(f"[OK] {name.upper()}: Logits {out['logits'].shape}, Ordinal {out['ordinal_logits'].shape}")
+            
+            # Test predict method
+            probs = model.predict(dummy_input)
+            assert probs.shape == (2, 5), f"Probs shape mismatch: {probs.shape}"
+            assert torch.allclose(probs.sum(dim=1), torch.ones(2), atol=1e-5), "Probs should sum to 1"
+            print(f"[OK] {name.upper()}: predict() returns valid probabilities")
+            
         except Exception as e:
             print(f"[ERROR] {name.upper()} failed: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
-            
-    print("All architecture tests passed successfully!")
+    
+    # Test without ordinal head
+    try:
+        model = ICCIT_DR_Net(use_msda=True, use_hff=True, num_classes=5, use_ordinal=False)
+        out = model(dummy_input)
+        assert out['ordinal_logits'] is None, "Ordinal logits should be None when use_ordinal=False"
+        print(f"[OK] No-ordinal mode: ordinal_logits is None as expected")
+    except Exception as e:
+        print(f"[ERROR] No-ordinal mode failed: {e}")
+        sys.exit(1)
+    
+    print("\nAll architecture tests passed successfully!")
 
 if __name__ == "__main__":
     run_tests()

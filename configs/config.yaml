@@ -1,15 +1,86 @@
+# ============================================================
+# Model & Backbone
+# ============================================================
 img_size: 384
-batch_size: 4
-accumulation_steps: 4
-lr: 1.0e-4
-backbone_lr_mult: 0.1  # backbone (pretrained) trains at lr * this; head trains at lr
-weight_decay: 0.05
-drop_path_rate: 0.2   # stochastic depth inside the Swin backbone
-label_smoothing: 0.05
-use_tta: True          # horizontal-flip averaging at test/external_validation time
-epochs: 50
-patience: 10
+backbone: swinv2_base_window12to16_192to256.ms_in22k_ft_in1k
+drop_path_rate: 0.2       # reduced — 0.3 was too aggressive, causing underfitting
+dropout: 0.3              # reduced from 0.5 — was over-regularizing the head
+num_classes: 5
 
+# ============================================================
+# Training
+# ============================================================
+batch_size: 32            # A100 80GB can handle 32 at 384x384 with SwinV2-Base
+accumulation_steps: 1     # effective batch size = 32 (no accumulation needed)
+num_workers: 8            # optimal for A100 with batch_size=32 at 384x384
+lr: 2.0e-4               # increased 4x — was too low, causing severe underfitting
+backbone_lr_mult: 0.1   # backbone LR = 2e-5 (was 2.5e-6 — far too low)
+weight_decay: 0.05
+head_weight_decay: 0.1   # stronger decay on randomly-init head
+label_smoothing: 0.05    # reduced from 0.1 — was over-softening with focal loss + mixup
+grad_clip_norm: 1.0
+
+# Scheduler
+scheduler: onecycle       # onecycle | cosine
+warmup_epochs: 5          # reduced from 10 — less warmup needed with higher LR
+max_lr: 2.0e-4            # OneCycleLR max LR (match base LR)
+pct_start: 0.1            # fraction of cycle spent increasing LR
+div_factor: 25.0          # initial_lr = max_lr / div_factor
+final_div_factor: 1000.0  # final_lr = max_lr / final_div_factor
+
+# Epochs & Early Stopping
+epochs: 60
+patience: 20              # increased from 15 — let model train longer with higher LR
+
+# SWA (Stochastic Weight Averaging)
+use_swa: True
+swa_start_epoch: 30       # start SWA after this epoch
+swa_anneal_epochs: 5      # anneal LR to low value during SWA
+swa_lr: 1.0e-6
+
+# EMA
+use_ema: True
+ema_decay: 0.999
+
+# ============================================================
+# Mixup / CutMix
+# ============================================================
+use_mixup: True
+mixup_alpha: 0.4           # Beta distribution parameter for Mixup
+cutmix_alpha: 1.0          # Beta distribution parameter for CutMix
+mix_prob: 0.2              # reduced from 0.5 — too much mixing was destroying training signal
+cutmix_prob: 0.5           # within mix_prob, probability of CutMix vs Mixup
+
+# ============================================================
+# Ordinal Loss
+# ============================================================
+use_ordinal_loss: True
+ordinal_loss_weight: 0.3   # weight of ordinal regression loss
+
+# ============================================================
+# K-Fold Cross Validation
+# ============================================================
+use_kfold: True
+n_folds: 5
+kfold_seed: 42
+
+# ============================================================
+# Test-Time Augmentation
+# ============================================================
+use_tta: True
+tta_scales: [0.9, 1.0, 1.1]   # multi-scale TTA
+tta_flips: True                # horizontal + vertical flip
+tta_rotations: True            # 4 rotations (0, 90, 180, 270)
+
+# ============================================================
+# Ensemble
+# ============================================================
+ensemble_folds: True          # average across K-fold models
+ensemble_ablations: False     # average across ablation configs
+
+# ============================================================
+# Dataset Paths
+# ============================================================
 dataset_paths:
   train_images: "datasets/APTOS_19/train_images"
   train_csv: "datasets/APTOS_19/train_1.csv"
@@ -20,6 +91,8 @@ dataset_paths:
   external_images: "datasets/Messidor_2/images"
   external_csv: "datasets/Messidor_2/messidor_data.csv"
 
+# ============================================================
 # Ablation flags
+# ============================================================
 use_msda: True
 use_hff: True
