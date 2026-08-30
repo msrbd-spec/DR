@@ -1,8 +1,0 @@
-datasets/
-├── APTOS_19/              (already have)
-├── Messidor_2/            (already have)
-└── EyePACS/               (new)
-    ├── train_images/      (extracted from train.zip)
-    └── trainLabels.csv    (extracted from trainLabels.csv.zip)
-
-  __One tip:__ The images in EyePACS are very high resolution (some 4000×3000+). You might want to resize them to 512×512 before training to save disk space and speed up data loading. But this is optional — the training code can handle full-resolution images (it resizes on-the-fly during loading anyway).
