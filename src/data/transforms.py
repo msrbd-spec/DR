@@ -46,10 +46,11 @@ def get_val_test_transforms(img_size: int = 512):
     No augmentation — only resize, normalisation, and tensor conversion.
     """
     return A.Compose([
-        A.Resize(size=(img_size, img_size)),
+        A.Resize(height=img_size, width=img_size),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2()
     ])
+
 
 
 def get_tta_transforms(img_size: int = 512, scale: float = 1.0):
@@ -59,8 +60,9 @@ def get_tta_transforms(img_size: int = 512, scale: float = 1.0):
     """
     crop_size = int(img_size * scale)
     return A.Compose([
-        A.Resize(size=(crop_size, crop_size)),
-        A.Resize(size=(img_size, img_size)),
+        A.Resize(height=crop_size, width=crop_size),
+        A.Resize(height=img_size, width=img_size),
+
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2()
     ])

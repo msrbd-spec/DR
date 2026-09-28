@@ -3,7 +3,8 @@ import cv2
 import torch
 import pandas as pd
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
+
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import StratifiedKFold
 
@@ -83,14 +84,31 @@ def get_dataloaders(config: dict, fold_idx: int = None):
         )
         y_train = train_df["diagnosis"].values
 
-    # Removed WeightedRandomSampler — was double-compensating with class weights in FocalLoss.
-    # Now using shuffle=True with class weights in the loss function only.
+    # Class-balanced sampling: oversample minority classes (APTOS is ~49% class 0).
+    # Controlled by config flag `use_weighted_sampling` (default True).
+    # Note: when using a sampler, shuffle must be False (sampler replaces it).
     classes = np.unique(y_train)
+    use_weighted_sampling = config.get("use_weighted_sampling", True)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, drop_last=True
-    )
+    if use_weighted_sampling:
+        class_counts = np.bincount(y_train, minlength=len(classes))
+        class_weights = 1.0 / np.maximum(class_counts, 1)  # avoid div-by-zero
+        sample_weights = class_weights[y_train]
+        sampler = WeightedRandomSampler(
+            weights=torch.DoubleTensor(sample_weights),
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, sampler=sampler,
+            num_workers=num_workers, pin_memory=True, drop_last=True
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True
+        )
+
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=True, drop_last=True

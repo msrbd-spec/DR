@@ -4,8 +4,9 @@
 img_size: 512
 backbone: swinv2_large_window12to16_192to256.ms_in22k_ft_in1k
 backbone_channels: [192, 384, 768, 1536]   # SwinV2-Large stage dims
-drop_path_rate: 0.1         # halved from 0.2 — was over-regularizing
-dropout: 0.1                # reduced from 0.3 — head already has BN
+drop_path_rate: 0.2         # increased from 0.1 — combat overfitting
+dropout: 0.2                # increased from 0.1 — combat overfitting
+
 num_classes: 5
 use_attention_pool: True    # spatial attention pooling in classification head
 use_aux_head: True          # deep supervision auxiliary head on stage-3
@@ -18,8 +19,9 @@ accumulation_steps: 4       # effective batch size = 32 (unchanged)
 num_workers: 8
 lr: 3.0e-4                  # increased from 2.0e-4
 backbone_lr_mult: 0.2       # backbone LR = 6e-5 (was 2e-5)
-weight_decay: 0.01          # reduced from 0.05
-head_weight_decay: 0.05     # reduced from 0.1
+weight_decay: 0.05          # increased from 0.01 — combat overfitting
+head_weight_decay: 0.1      # increased from 0.05 — combat overfitting
+
 label_smoothing: 0.0        # removed — focal loss already provides soft targets
 grad_clip_norm: 1.0
 
@@ -57,8 +59,9 @@ aux_loss_weight: 0.2        # deep supervision auxiliary loss weight
 use_mixup: True
 mixup_alpha: 0.4
 cutmix_alpha: 1.0
-mix_prob: 0.1               # reduced from 0.2
-cutmix_prob: 0.3            # reduced from 0.5
+mix_prob: 0.2               # increased from 0.1 — combat overfitting
+cutmix_prob: 0.5            # increased from 0.3 — combat overfitting
+
 
 # ============================================================
 # Ordinal Loss
@@ -107,6 +110,10 @@ dataset_paths:
 use_msda: True
 use_hff: True
 
+# Class-balanced sampling (oversamples minority classes in train loader)
+use_weighted_sampling: True
+
+
 # ============================================================
 # SSL Pretraining (Phase 2-3 of plan.md)
 # ============================================================
@@ -116,5 +123,7 @@ ssl_config: "configs/config_ssl.yaml"
 # Path to SSL-pretrained backbone weights
 # Set to null to use ImageNet pretraining
 # Set to "checkpoints/ssl_pretrained_backbone.pth" to use SSL-pretrained weights
-ssl_pretrained_path: null
+# ssl_pretrained_path: null
+ssl_pretrained_path: "checkpoints/ssl_pretrained_backbone.pth"
+
 
