@@ -1,0 +1,29 @@
+# VAE
+vae_backbone: "kl-f8"          # or whichever base checkpoint is used
+vae_epochs: 50
+vae_use_lesion_weighted_loss: False   # item 6
+
+# U-Net
+unet_base_channels: 128
+unet_channel_mult: [1, 2, 4, 4]
+unet_use_lesion_conditioning: False   # item 1
+unet_use_ordinal_conditioning: False  # item 3
+unet_use_rep_blocks: False            # RepConv-reparam ResBlocks, reuses P5 design
+unet_epochs: 150
+
+# Loss
+use_spectral_loss: False              # item 5
+spectral_loss_weight: 0.1
+
+# Sampling / filtering
+ddim_steps: 50
+guidance_scale: 3.0
+classifier_filter_min_confidence: 0.6
+classifier_filter_max_disagreement: 0.3
+
+# Active loop (item 4)
+use_active_loop: False
+active_loop_rounds: 3
+
+# Target
+target_per_class: 2000   # matches DR-LDS's own target, for fair comparison

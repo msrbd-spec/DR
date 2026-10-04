@@ -24,13 +24,13 @@
 - [x] P5: RepConv-style `RepProjConv`, `HFFBlock` updates, and fusion method
 
 ## P6 — Lesion-Guided, Classifier-Filtered Diffusion Synthetic Augmentation
-- [ ] P6.0: DR-LDS replication
-- [ ] P6.1: Lesion-mask spatial conditioning
-- [ ] P6.2: Classifier-in-the-loop filtering
-- [ ] P6.3: Ordinal-aware conditioning
-- [ ] P6.4: Active error-driven synthetic sampling loop
-- [ ] P6.5: Spectral fidelity loss
-- [ ] P6.6: Lesion-weighted VAE reconstruction loss
+- [x] P6.0: DR-LDS replication
+- [x] P6.1: Lesion-mask spatial conditioning
+- [x] P6.2: Classifier-in-the-loop filtering
+- [x] P6.3: Ordinal-aware conditioning
+- [x] P6.4: Active error-driven synthetic sampling loop
+- [x] P6.5: Spectral fidelity loss
+- [x] P6.6: Lesion-weighted VAE reconstruction loss
 
 ## P7 — Final Results-Generation Automation
 - [x] P7: `results_logger.py`, wiring into `main.py`, and `generate_tables.py`

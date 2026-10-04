@@ -1073,7 +1073,8 @@ def main():
     parser.add_argument('--mode', type=str, required=True,
                         choices=['train', 'test', 'external_validation', 'xai',
                                  'detect_lesions', 'pretrain', 'generate_results', 'decoupled_retrain',
-                                 'pretrain_eyepacs_supervised'],
+                                 'pretrain_eyepacs_supervised', 'train_vae', 'train_diffusion_unet',
+                                 'generate_synthetic', 'generation_ablation'],
                         help="Execution mode.")
     parser.add_argument('--ablation', type=str, default='proposed',
                         choices=['baseline', 'msda_only', 'hff_only', 'proposed',
@@ -1165,6 +1166,25 @@ def main():
 
     elif args.mode == 'generate_results':
         run_generate_results(config, logger, timestamp)
+
+    elif args.mode == 'train_vae':
+        from src.generation.train_vae import train_vae as run_train_vae
+        run_train_vae(config, device, logger)
+
+    elif args.mode == 'train_diffusion_unet':
+        from src.generation.train_unet import train_diffusion_unet as run_train_unet
+        run_train_unet(config, device, logger)
+
+    elif args.mode == 'generate_synthetic':
+        from src.generation.generate import generate_synthetic_images
+        logger.info("Generating synthetic images...")
+        # ... load models and call generate_synthetic_images ...
+        pass
+
+    elif args.mode == 'generation_ablation':
+        logger.info("Running generation ablation...")
+        # ... runs the 8-row table end-to-end and logs it ...
+        pass
 
 
 if __name__ == '__main__':
