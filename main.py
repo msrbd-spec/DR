@@ -594,18 +594,6 @@ def run_generate_results(config, logger, timestamp):
             arch_results[test_ablation] = full_metrics   # current run, if not already logged
         if arch_results:
             generate_architecture_ablation_table(arch_results)
-                            'recall_macro': float(row.get('Recall (%)', 0)) / 100,
-                            'f1_macro': float(row.get('F1 (macro) (%)', 0)) / 100,
-                            'f1_weighted': float(row.get('F1 (weighted) (%)', 0)) / 100,
-                            'qwk': float(row.get('QWK', 0)),
-                            'kappa': float(row.get('Kappa', 0)),
-                            'auc_macro': float(row.get('AUC', 0)),
-                        }
-            except Exception as e:
-                logger.warning(f"  Could not merge existing arch CSV: {e}")
-
-        logger.info("Generating architecture ablation table...")
-        generate_architecture_ablation_table(arch_results)
 
     # ===================================================================
     # 3. Generate charts from predictions
