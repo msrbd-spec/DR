@@ -6,6 +6,7 @@ backbone: swinv2_large_window12to16_192to256.ms_in22k_ft_in1k
 backbone_channels: [192, 384, 768, 1536]   # SwinV2-Large stage dims
 drop_path_rate: 0.2         # increased from 0.1 — combat overfitting
 dropout: 0.2                # increased from 0.1 — combat overfitting
+freeze_backbone_stages: 2   # P1 fix: freeze SwinV2 stages 0-1 (of 0-3) + patch_embed.
 
 num_classes: 5
 use_attention_pool: True    # spatial attention pooling in classification head
@@ -25,6 +26,10 @@ head_weight_decay: 0.1      # increased from 0.05 — combat overfitting
 label_smoothing: 0.0        # removed — focal loss already provides soft targets
 grad_clip_norm: 1.0
 
+# SAM (Sharpness-Aware Minimization) — optional, P1 overfitting fix
+use_sam: False                # set True to enable; bypasses grad accumulation (see trainer.py)
+sam_rho: 0.05                 # neighborhood radius for the ascent step
+
 # Scheduler
 scheduler: cosine           # cosine with linear warmup
 warmup_epochs: 10           # linear warmup for 10 epochs
@@ -36,6 +41,8 @@ final_div_factor: 1000.0
 # Epochs & Early Stopping
 epochs: 80
 patience: 25
+decoupled_epochs: 12
+decoupled_lr: 3.0e-5
 
 # SWA (Stochastic Weight Averaging)
 use_swa: True
@@ -50,8 +57,17 @@ ema_decay: 0.999
 # ============================================================
 # Loss
 # ============================================================
+loss_type: "focal"      # "focal" | "ldam"
+ldam_max_margin: 0.5
+ldam_scale: 30.0
 focal_gamma: 1.5            # reduced from 2.0 — less aggressive easy-example downweighting
 aux_loss_weight: 0.2        # deep supervision auxiliary loss weight
+use_logit_adjustment: False
+logit_adjustment_tau: 1.0
+use_drw: False
+drw_start_frac: 0.6   # switch to class-balanced weighting after 60% of epochs
+class_weight_strategy: "inverse"   # "inverse" | "effective_num"
+cb_beta: 0.9999
 
 # ============================================================
 # Mixup / CutMix
@@ -59,8 +75,18 @@ aux_loss_weight: 0.2        # deep supervision auxiliary loss weight
 use_mixup: True
 mixup_alpha: 0.4
 cutmix_alpha: 1.0
-mix_prob: 0.2               # increased from 0.1 — combat overfitting
+mix_prob: 0.4               # P1 fix: increased from 0.2 — stronger regularization
 cutmix_prob: 0.5            # increased from 0.3 — combat overfitting
+
+
+# ============================================================
+# FDA Domain Adaptation
+# ============================================================
+use_fda: False
+fda_pool_frac: 0.2      # fraction of Messidor-2 reserved as style pool only
+fda_pool_seed: 42
+fda_prob: 0.3           # probability of applying FDA per training sample
+fda_beta: 0.03          # low-frequency swap fraction
 
 
 # ============================================================

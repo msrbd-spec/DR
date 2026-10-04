@@ -47,9 +47,9 @@ def plot_training_curves(history, output_dir='results/figures', fold_label='Prop
     # Loss curve
     fig, ax = plt.subplots(figsize=(8, 5))
     if 'train_loss' in history:
-        ax.plot(epochs, history['train_loss'], label='Train Loss', color=COLORS[0], linewidth=2)
+        ax.plot(epochs, history['train_loss'], label='Train Loss', color='blue', linewidth=2)
     if 'val_loss' in history:
-        ax.plot(epochs, history['val_loss'], label='Val Loss', color=COLORS[3], linewidth=2)
+        ax.plot(epochs, history['val_loss'], label='Val Loss', color='red', linewidth=2)
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss')
     ax.set_title(f'Training & Validation Loss — {fold_label}')
@@ -64,9 +64,9 @@ def plot_training_curves(history, output_dir='results/figures', fold_label='Prop
     # Accuracy curve
     fig, ax = plt.subplots(figsize=(8, 5))
     if 'train_acc' in history:
-        ax.plot(epochs, [a * 100 for a in history['train_acc']], label='Train Acc', color=COLORS[0], linewidth=2)
+        ax.plot(epochs, [a * 100 for a in history['train_acc']], label='Train Acc', color='blue', linewidth=2)
     if 'val_acc' in history:
-        ax.plot(epochs, [a * 100 for a in history['val_acc']], label='Val Acc', color=COLORS[1], linewidth=2)
+        ax.plot(epochs, [a * 100 for a in history['val_acc']], label='Val Acc', color='red', linewidth=2)
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Accuracy (%)')
     ax.set_title(f'Training & Validation Accuracy — {fold_label}')

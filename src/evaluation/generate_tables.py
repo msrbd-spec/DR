@@ -290,3 +290,22 @@ def generate_classification_report_text(y_true, y_pred, class_names=None,
         f.write(report)
     print(f"Saved: {path}")
     return report
+
+def generate_diffusion_ablation_table(results, output_dir='results/tables'):
+    os.makedirs(output_dir, exist_ok=True)
+    rows = []
+    for name, m in results.items():
+        rows.append({
+            'Configuration': name,
+            'FID': fmt(m.get('fid', 0)),
+            'KID': fmt(m.get('kid', 0), decimals=4),
+            'Severe F1 (%)': fmt(m.get('severe_f1', 0) * 100),
+            'Proliferative F1 (%)': fmt(m.get('proliferative_f1', 0) * 100),
+            'Max SSIM (leakage)': fmt(m.get('ssim_leakage_max', 0), decimals=3),
+            'Gen Time/Step (s)': fmt(m.get('generation_time_per_step', 0), decimals=3),
+        })
+    df = pd.DataFrame(rows)
+    path = os.path.join(output_dir, 'ablation_diffusion.csv')
+    df.to_csv(path, index=False)
+    print(f"Saved: {path}")
+    return df

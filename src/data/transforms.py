@@ -8,10 +8,11 @@ def get_train_transforms(img_size: int = 512):
     Softened augmentation pipeline for the training set.
 
     Key changes from previous pipeline:
-      - Removed: GridDistortion, OpticalDistortion, CoarseDropout
-        (these destroy fine lesion geometry — microaneurysms, hemorrhages)
+      - Removed: GridDistortion, OpticalDistortion (destroy fine lesion geometry)
       - Reduced: ColorJitter hue 0.1→0.02, RandomResizedCrop scale (0.8,1.0)→(0.9,1.0)
       - Kept: RandomRotate90, flips, CLAHE, Sharpen, RandomBrightnessContrast, Affine
+      - P1 fix: small-scale CoarseDropout re-added (holes ≤16px, well under
+        lesion scale) — counteracts the overfitting the full removal caused
 
     NOTE: Uses `size=(h, w)` API for newer albumentations versions (>=1.4).
     """
@@ -32,9 +33,18 @@ def get_train_transforms(img_size: int = 512):
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.CLAHE(clip_limit=2.0, p=0.3),
         A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=0.3),
-        # Removed: GridDistortion, OpticalDistortion, CoarseDropout
         # Affine — mild geometric augmentation (kept, was already reasonable)
         A.Affine(translate_percent=0.1, scale=0.9, rotate=45, p=0.3),
+        # P1 fix: small-scale CoarseDropout re-added — holes capped at 16px,
+        # well below microaneurysm/hemorrhage scale, so lesion geometry is
+        # preserved while still providing a regularizing cutout signal.
+        A.CoarseDropout(
+            num_holes_range=(1, 3),
+            hole_height_range=(8, 16),
+            hole_width_range=(8, 16),
+            fill=0,
+            p=0.15
+        ),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2()
     ])

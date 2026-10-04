@@ -16,6 +16,7 @@ os.makedirs('checkpoints', exist_ok=True)
 
 from ..evaluation.metrics import compute_metrics
 from .mixup import apply_mixup_or_cutmix, mixup_criterion
+from .sam import SAM
 
 logger = logging.getLogger(__name__)
 
@@ -156,21 +157,29 @@ class DRTrainer:
         self.ablation = ablation
         self.fold_idx = fold_idx
 
+        self.use_drw = config.get("use_drw", False)
+        self.drw_start_epoch = int(config.get("drw_start_frac", 0.6) * self.epochs)
+
         # Optimizer with separate LR groups
         lr = config.get("lr", 3e-4)
         weight_decay = config.get("weight_decay", 0.01)
         head_weight_decay = config.get("head_weight_decay", 0.05)
         backbone_lr_mult = config.get("backbone_lr_mult", 0.2)
 
-        backbone_params = [p for n, p in self.model.named_parameters() if n.startswith("backbone")]
-        head_params = [p for n, p in self.model.named_parameters() if not n.startswith("backbone")]
+        backbone_params = [p for n, p in self.model.named_parameters() if n.startswith("backbone") and p.requires_grad]
+        head_params = [p for n, p in self.model.named_parameters() if not n.startswith("backbone") and p.requires_grad]
 
-        self.optimizer = AdamW(
-            [
-                {"params": backbone_params, "lr": lr * backbone_lr_mult, "weight_decay": weight_decay},
-                {"params": head_params, "lr": lr, "weight_decay": head_weight_decay},
-            ],
-        )
+        self.use_sam = config.get("use_sam", False)
+        self.sam_rho = config.get("sam_rho", 0.05)
+        param_groups = [
+            {"params": backbone_params, "lr": lr * backbone_lr_mult, "weight_decay": weight_decay},
+            {"params": head_params, "lr": lr, "weight_decay": head_weight_decay},
+        ]
+        if self.use_sam:
+            self.optimizer = SAM(param_groups, AdamW, rho=self.sam_rho)
+            logger.info(f"Using SAM optimizer (rho={self.sam_rho}); gradient accumulation is bypassed while SAM is enabled.")
+        else:
+            self.optimizer = AdamW(param_groups)
 
         # Save initial LRs
         for pg in self.optimizer.param_groups:
@@ -256,7 +265,7 @@ class DRTrainer:
         )):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
 
-            # Apply Mixup/CutMix
+            # Apply Mixup/CutMix (same mixed batch reused across both SAM passes)
             if self.use_mixup:
                 mixed_inputs, y_a, y_b, lam = apply_mixup_or_cutmix(
                     inputs, targets,
@@ -268,36 +277,59 @@ class DRTrainer:
             else:
                 mixed_inputs, y_a, y_b, lam = inputs, targets, targets, 1.0
 
-            with torch.amp.autocast('cuda'):
+            def _compute_loss():
                 outputs = self.model(mixed_inputs)
                 if self.use_mixup and lam < 1.0:
-                    loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                    batch_loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
                 else:
-                    loss = self.criterion(outputs, targets)
-                loss = loss / self.accumulation_steps
+                    batch_loss = self.criterion(outputs, targets)
+                return outputs, batch_loss
 
-            self.scaler.scale(loss).backward()
+            if self.use_sam:
+                # --- SAM two-pass update (bypasses grad accumulation) ---
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    outputs, loss = _compute_loss()
+                loss.backward()
+                self.optimizer.first_step(zero_grad=True)
 
-            if (i + 1) % self.accumulation_steps == 0 or (i + 1) == len(self.train_loader):
-                self.scaler.unscale_(self.optimizer)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    _, loss2 = _compute_loss()
+                loss2.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                self.optimizer.second_step(zero_grad=True)
 
-                # Only step optimizer/scaler if no inf/nan gradients
-                old_scale = self.scaler.get_scale()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                new_scale = self.scaler.get_scale()
-
-                self.optimizer.zero_grad()
-
-                # Step scheduler per batch (both onecycle and cosine-with-warmup)
-                if new_scale >= old_scale and self.scheduler_step_per_batch:
+                if self.scheduler_step_per_batch:
                     self.scheduler.step()
-
                 if self.use_ema:
                     self.ema.update(self.model)
 
-            running_loss += loss.item() * self.accumulation_steps * inputs.size(0)
+                running_loss += loss.item() * inputs.size(0)
+            else:
+                # --- Standard AMP + gradient-accumulation update (unchanged) ---
+                with torch.amp.autocast('cuda'):
+                    outputs, loss = _compute_loss()
+                    loss = loss / self.accumulation_steps
+
+                self.scaler.scale(loss).backward()
+
+                if (i + 1) % self.accumulation_steps == 0 or (i + 1) == len(self.train_loader):
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+                    old_scale = self.scaler.get_scale()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    new_scale = self.scaler.get_scale()
+
+                    self.optimizer.zero_grad()
+
+                    if new_scale >= old_scale and self.scheduler_step_per_batch:
+                        self.scheduler.step()
+
+                    if self.use_ema:
+                        self.ema.update(self.model)
+
+                running_loss += loss.item() * self.accumulation_steps * inputs.size(0)
 
             # For metrics, use original (unmixed) targets and classification logits
             with torch.no_grad():
@@ -375,6 +407,9 @@ class DRTrainer:
         train_accs, val_accs = [], []
 
         for epoch in range(self.epochs):
+            if self.use_drw:
+                self.criterion.set_reweighting(epoch >= self.drw_start_epoch)
+
             train_loss, train_metrics = self.train_epoch(epoch)
 
             # Evaluate with EMA model

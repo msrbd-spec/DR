@@ -7,8 +7,8 @@ def plot_training_curves(train_loss, val_loss, train_acc, val_acc, filename='tra
     plt.figure(figsize=(12, 5))
     
     plt.subplot(1, 2, 1)
-    plt.plot(train_loss, label='Train Loss')
-    plt.plot(val_loss, label='Val Loss')
+    plt.plot(train_loss, label='Train Loss', color='blue')
+    plt.plot(val_loss, label='Val Loss', color='red')
     plt.title('Loss Curve')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
@@ -17,8 +17,8 @@ def plot_training_curves(train_loss, val_loss, train_acc, val_acc, filename='tra
     plt.subplot(1, 2, 2)
     # train_acc might be None if we don't compute it per epoch during training
     if train_acc:
-        plt.plot(train_acc, label='Train Acc')
-    plt.plot(val_acc, label='Val Acc')
+        plt.plot(train_acc, label='Train Acc', color='blue')
+    plt.plot(val_acc, label='Val Acc', color='red')
     plt.title('Accuracy Curve')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')

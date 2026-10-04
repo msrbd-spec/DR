@@ -39,7 +39,9 @@ class RetiNA_Net(nn.Module):
                  use_aux_head: bool = True, use_attention_pool: bool = True,
                  backbone_name: str = 'swinv2_large_window12to16_192to256.ms_in22k_ft_in1k',
                  stage_channels=(192, 384, 768, 1536),
-                 ssl_pretrained_path: str = None):
+                 ssl_pretrained_path: str = None,
+                 freeze_backbone_stages: int = 0,
+                 use_rep_proj: bool = False):
         """
         Args:
             ssl_pretrained_path: Path to SSL-pretrained backbone weights.
@@ -82,6 +84,9 @@ class RetiNA_Net(nn.Module):
         elif ssl_pretrained_path is not None:
             print(f"Warning: SSL pretrained path '{ssl_pretrained_path}' not found. Using ImageNet weights.")
 
+        self.freeze_backbone_stages = freeze_backbone_stages
+        if freeze_backbone_stages > 0:
+            self._freeze_backbone_stages(freeze_backbone_stages)
 
         if self.use_msda:
             self.msda3 = MSDABlock(in_channels=self.stage_channels[2], kernel_size=3)
@@ -90,7 +95,8 @@ class RetiNA_Net(nn.Module):
         if self.use_hff:
             self.hff = HFFBlock(
                 stage_channels=tuple(self.stage_channels),
-                target_channels=self.stage_channels[3]
+                target_channels=self.stage_channels[3],
+                use_rep_proj=use_rep_proj
             )
 
         # Multi-scale classification head (attention pooling + 2-layer MLP)
@@ -116,6 +122,43 @@ class RetiNA_Net(nn.Module):
                 num_classes=num_classes,
                 dropout=dropout
             )
+
+    def _freeze_backbone_stages(self, num_stages: int):
+        num_stages = min(num_stages, len(self.backbone.layers))
+
+        if hasattr(self.backbone, 'patch_embed'):
+            for p in self.backbone.patch_embed.parameters():
+                p.requires_grad_(False)
+
+        for i in range(num_stages):
+            for p in self.backbone.layers[i].parameters():
+                p.requires_grad_(False)
+
+        frozen = sum(p.numel() for p in self.backbone.parameters() if not p.requires_grad)
+        total = sum(p.numel() for p in self.backbone.parameters())
+        print(f"Backbone freeze: stages 0-{num_stages-1} frozen "
+              f"({frozen:,}/{total:,} backbone params, {100*frozen/total:.1f}%)")
+
+    def freeze_all_except_heads(self):
+        """Freeze backbone + MSDA/HFF; leave classification/aux/ordinal heads trainable.
+        Used for decoupled classifier re-training (cRT/LWS)."""
+        for p in self.backbone.parameters():
+            p.requires_grad_(False)
+        if self.use_msda:
+            for p in self.msda3.parameters(): p.requires_grad_(False)
+            for p in self.msda4.parameters(): p.requires_grad_(False)
+        if self.use_hff:
+            for p in self.hff.parameters(): p.requires_grad_(False)
+        # self.head, self.aux_head, self.ordinal_head stay trainable
+
+    def fuse_reparam_blocks(self):
+        """Call after loading a trained use_rep_proj=True checkpoint, in
+        eval() mode, before running inference/TTA/ensemble — folds each
+        RepProjConv's two branches into one conv for faster inference."""
+        if self.use_hff and getattr(self.hff.proj_stage1, 'fuse', None):
+            self.hff.proj_stage1.fuse()
+            self.hff.proj_stage2.fuse()
+            self.hff.proj_stage3.fuse()
 
     def forward(self, x):
         features = self.backbone(x)

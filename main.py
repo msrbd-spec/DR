@@ -69,20 +69,48 @@ def get_ablation_flags(ablation):
         raise ValueError(f"Unknown ablation mode: {ablation}")
 
 
+# Full 5-flag architecture ablation registry (P3). Distinct from the
+# original 4-name get_ablation_flags(), which stays unchanged for
+# backward compatibility with already-logged baseline/msda_only/
+# hff_only/proposed results.
+ARCHITECTURE_ABLATIONS = {
+    'arch_baseline':  dict(use_msda=False, use_hff=False, use_attention_pool=False, use_aux_head=False, use_ordinal=False),
+    'arch_msda':      dict(use_msda=True,  use_hff=False, use_attention_pool=False, use_aux_head=False, use_ordinal=False),
+    'arch_hff':       dict(use_msda=False, use_hff=True,  use_attention_pool=False, use_aux_head=False, use_ordinal=False),
+    'arch_msda_hff':  dict(use_msda=True,  use_hff=True,  use_attention_pool=False, use_aux_head=False, use_ordinal=False),
+    'arch_attnpool':  dict(use_msda=True,  use_hff=True,  use_attention_pool=True,  use_aux_head=False, use_ordinal=False),
+    'arch_auxhead':   dict(use_msda=True,  use_hff=True,  use_attention_pool=True,  use_aux_head=True,  use_ordinal=False),
+    'arch_full':      dict(use_msda=True,  use_hff=True,  use_attention_pool=True,  use_aux_head=True,  use_ordinal=True),
+}
+
+
+def resolve_ablation_flags(ablation, config):
+    """Single source of truth for all 3 call sites (create_model, run_test,
+    run_external_validation). Returns (use_msda, use_hff, use_attention_pool,
+    use_aux_head, use_ordinal)."""
+    if ablation in ARCHITECTURE_ABLATIONS:
+        f = ARCHITECTURE_ABLATIONS[ablation]
+        return f['use_msda'], f['use_hff'], f['use_attention_pool'], f['use_aux_head'], f['use_ordinal']
+    use_msda, use_hff = get_ablation_flags(ablation)
+    return (use_msda, use_hff,
+            config.get("use_attention_pool", True),
+            config.get("use_aux_head", True),
+            config.get("use_ordinal_loss", True))
+
+
 def create_model(config, ablation, device):
     """Create model with config parameters."""
-    use_msda, use_hff = get_ablation_flags(ablation)
-    use_ordinal = config.get("use_ordinal_loss", True)
+    use_msda, use_hff, use_attention_pool, use_aux_head, use_ordinal = resolve_ablation_flags(ablation, config)
     drop_path_rate = config.get("drop_path_rate", 0.1)
     dropout = config.get("dropout", 0.1)
     num_classes = config.get("num_classes", 5)
-    use_aux_head = config.get("use_aux_head", True)
-    use_attention_pool = config.get("use_attention_pool", True)
     backbone_name = config.get("backbone", "swinv2_large_window12to16_192to256.ms_in22k_ft_in1k")
     stage_channels = config.get("backbone_channels", [192, 384, 768, 1536])
 
     # SSL pretrained backbone path (if available, loads SSL weights instead of ImageNet)
     ssl_pretrained_path = config.get("ssl_pretrained_path", None)
+    freeze_backbone_stages = config.get("freeze_backbone_stages", 0)
+    use_rep_proj = config.get("use_rep_proj", False)
 
     model = RetiNA_Net(
         use_msda=use_msda,
@@ -95,14 +123,21 @@ def create_model(config, ablation, device):
         use_attention_pool=use_attention_pool,
         backbone_name=backbone_name,
         stage_channels=tuple(stage_channels),
-        ssl_pretrained_path=ssl_pretrained_path
+        ssl_pretrained_path=ssl_pretrained_path,
+        freeze_backbone_stages=freeze_backbone_stages,
+        use_rep_proj=use_rep_proj
     ).to(device)
     return model
 
 
 
-def create_criterion(config, class_weights, device):
+def create_criterion(config, class_weights, device, class_priors=None, cls_num_list=None):
     """Create loss function with config parameters."""
+    loss_type = config.get("loss_type", "focal")
+    ldam_max_margin = config.get("ldam_max_margin", 0.5)
+    ldam_scale = config.get("ldam_scale", 30.0)
+    use_logit_adjustment = config.get("use_logit_adjustment", False)
+    logit_adjustment_tau = config.get("logit_adjustment_tau", 1.0)
     use_ordinal = config.get("use_ordinal_loss", True)
     ordinal_weight = config.get("ordinal_loss_weight", 0.3)
     label_smoothing = config.get("label_smoothing", 0.0)
@@ -120,17 +155,24 @@ def create_criterion(config, class_weights, device):
         num_classes=num_classes,
         focal_gamma=focal_gamma,
         use_aux=use_aux,
-        aux_loss_weight=aux_loss_weight
+        aux_loss_weight=aux_loss_weight,
+        class_priors=class_priors,
+        use_logit_adjustment=use_logit_adjustment,
+        logit_adjustment_tau=logit_adjustment_tau,
+        loss_type=loss_type,
+        cls_num_list=cls_num_list,
+        ldam_max_margin=ldam_max_margin,
+        ldam_scale=ldam_scale
     )
     return criterion
 
 
 def train_single_fold(config, ablation, device, logger, fold_idx=None):
     """Train a single fold (or standard train/val split)."""
-    train_loader, val_loader, _, _, class_weights = get_dataloaders(config, fold_idx=fold_idx)
+    train_loader, val_loader, _, _, class_weights, class_priors, cls_num_list = get_dataloaders(config, fold_idx=fold_idx)
 
     model = create_model(config, ablation, device)
-    criterion = create_criterion(config, class_weights, device)
+    criterion = create_criterion(config, class_weights, device, class_priors=class_priors, cls_num_list=cls_num_list)
     trainer = DRTrainer(
         model, train_loader, val_loader, criterion, device, config,
         ablation=ablation, fold_idx=fold_idx
@@ -172,7 +214,7 @@ def train_kfold(config, ablation, device, logger, timestamp):
 
 def run_test(config, ablation, device, logger, timestamp):
     """Run test evaluation with optional ensemble."""
-    _, _, test_loader, _, _ = get_dataloaders(config, fold_idx=None)
+    _, _, test_loader, _, _, _, _ = get_dataloaders(config, fold_idx=None)
 
     use_kfold = config.get("use_kfold", True)
     n_folds = config.get("n_folds", 5)
@@ -194,10 +236,7 @@ def run_test(config, ablation, device, logger, timestamp):
 
         logger.info(f"Loading ensemble of {len(model_paths)} fold models...")
 
-        use_msda, use_hff = get_ablation_flags(ablation)
-        use_ordinal = config.get("use_ordinal_loss", True)
-        use_aux_head = config.get("use_aux_head", True)
-        use_attention_pool = config.get("use_attention_pool", True)
+        use_msda, use_hff, use_attention_pool, use_aux_head, use_ordinal = resolve_ablation_flags(ablation, config)
         backbone_name = config.get("backbone", "swinv2_large_window12to16_192to256.ms_in22k_ft_in1k")
         stage_channels = config.get("backbone_channels", [192, 384, 768, 1536])
 
@@ -232,6 +271,8 @@ def run_test(config, ablation, device, logger, timestamp):
         model_path = f'checkpoints/best_model_{ablation}.pth'
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
+        if hasattr(model, 'fuse_reparam_blocks'):
+            model.fuse_reparam_blocks()
 
         all_preds, all_targets, all_probs = [], [], []
         with torch.no_grad():
@@ -269,6 +310,11 @@ def run_test(config, ablation, device, logger, timestamp):
     logger.info(f"Test Metrics - Acc: {metrics['accuracy']:.4f}, Precision: {metrics['precision']:.4f}, Recall: {metrics['recall']:.4f}, F1: {metrics['f1_macro']:.4f}, QWK: {metrics['qwk']:.4f}")
     logger.info(f"Test Classification Report:\n{metrics['classification_report']}")
 
+    from src.evaluation.results_logger import log_architecture_ablation_result
+    from src.evaluation.generate_tables import compute_all_metrics
+    full_metrics = compute_all_metrics(all_targets, all_preds, y_prob=np.array(all_probs), num_classes=config.get("num_classes", 5))
+    log_architecture_ablation_result(ablation, full_metrics)
+
     plot_confusion_matrix(all_targets, all_preds, filename=os.path.join('results', f'confusion_matrix_{ablation}_{timestamp}.png'))
     plot_roc_curve(all_targets, np.array(all_probs), filename=os.path.join('results', f'roc_multiclass_{ablation}_{timestamp}.png'))
 
@@ -286,7 +332,7 @@ def run_test(config, ablation, device, logger, timestamp):
 
 def run_external_validation(config, ablation, device, logger, timestamp):
     """Run external validation on Messidor-2 with optional ensemble."""
-    _, _, _, ext_loader, _ = get_dataloaders(config, fold_idx=None)
+    _, _, _, ext_loader, _, _, _ = get_dataloaders(config, fold_idx=None)
 
     if ext_loader is None:
         logger.error("External validation dataset not configured.")
@@ -311,10 +357,7 @@ def run_external_validation(config, ablation, device, logger, timestamp):
 
         logger.info(f"Loading ensemble of {len(model_paths)} fold models for external validation...")
 
-        use_msda, use_hff = get_ablation_flags(ablation)
-        use_ordinal = config.get("use_ordinal_loss", True)
-        use_aux_head = config.get("use_aux_head", True)
-        use_attention_pool = config.get("use_attention_pool", True)
+        use_msda, use_hff, use_attention_pool, use_aux_head, use_ordinal = resolve_ablation_flags(ablation, config)
         backbone_name = config.get("backbone", "swinv2_large_window12to16_192to256.ms_in22k_ft_in1k")
         stage_channels = config.get("backbone_channels", [192, 384, 768, 1536])
 
@@ -347,6 +390,8 @@ def run_external_validation(config, ablation, device, logger, timestamp):
         model_path = f'checkpoints/best_model_{ablation}.pth'
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
+        if hasattr(model, 'fuse_reparam_blocks'):
+            model.fuse_reparam_blocks()
 
         all_preds, all_targets, all_probs = [], [], []
         with torch.no_grad():
@@ -542,22 +587,13 @@ def run_generate_results(config, logger, timestamp):
         # Compute full metrics for architecture ablation table
         logger.info("Computing full metrics for architecture ablation table...")
         full_metrics = compute_all_metrics(y_true, y_pred, y_prob=y_prob, num_classes=num_classes)
-        arch_results = {test_ablation: full_metrics}
-
-        # If there are previously saved ablation results, merge them
-        # (This allows accumulating results from multiple --ablation runs)
-        existing_arch_csv = os.path.join('results/tables', 'ablation_architecture.csv')
-        if os.path.exists(existing_arch_csv):
-            import pandas as pd
-            try:
-                existing_df = pd.read_csv(existing_arch_csv)
-                for _, row in existing_df.iterrows():
-                    name = row['Model']
-                    if name not in arch_results:
-                        # Parse saved metrics back from CSV string values
-                        arch_results[name] = {
-                            'accuracy': float(row.get('Accuracy (%)', 0)) / 100,
-                            'precision_macro': float(row.get('Precision (%)', 0)) / 100,
+        
+        from src.evaluation.results_logger import _load_results_dict
+        arch_results = _load_results_dict('results/ablation_results.npz')
+        if test_ablation not in arch_results and full_metrics is not None:
+            arch_results[test_ablation] = full_metrics   # current run, if not already logged
+        if arch_results:
+            generate_architecture_ablation_table(arch_results)
                             'recall_macro': float(row.get('Recall (%)', 0)) / 100,
                             'f1_macro': float(row.get('F1 (macro) (%)', 0)) / 100,
                             'f1_weighted': float(row.get('F1 (weighted) (%)', 0)) / 100,
@@ -733,27 +769,23 @@ def run_generate_results(config, logger, timestamp):
 
     # ===================================================================
     # 7. Generate SSL ablation table (Table 2)
-    #    Tries to load saved SSL ablation results; falls back to template
     # ===================================================================
     logger.info("Generating SSL pretraining ablation table (Table 2)...")
-    ssl_ablation_path = os.path.join('results', 'ssl_ablation_results.npz')
-    if os.path.exists(ssl_ablation_path):
-        ssl_abl_data = np.load(ssl_ablation_path, allow_pickle=True)
-        ssl_abl_results = {}
-        for key in ssl_abl_data.files:
-            d = ssl_abl_data[key].item()
-            ssl_abl_results[key] = d
+    from src.evaluation.results_logger import _load_results_dict
+    ssl_abl_results = _load_results_dict('results/ssl_ablation_results.npz')
+    if not ssl_abl_results:
+        logger.warning("No SSL ablation results logged yet. Run the SSL "
+                        "ablation sweep (P3) before generate_results for real values.")
     else:
-        # Template with placeholder values — user fills in after running experiments
-        logger.info("  No saved SSL ablation results found. Generating template with placeholders.")
-        logger.info("  Run SSL ablation experiments and save to results/ssl_ablation_results.npz for real values.")
-        ssl_abl_results = {
-            'ImageNet pretrain': {'val_acc': 0.0, 'val_qwk': 0.0, 'test_acc': 0.0, 'test_qwk': 0.0},
-            'Contrastive only': {'val_acc': 0.0, 'val_qwk': 0.0, 'test_acc': 0.0, 'test_qwk': 0.0},
-            'Multi-task only': {'val_acc': 0.0, 'val_qwk': 0.0, 'test_acc': 0.0, 'test_qwk': 0.0},
-            'Full SSL (Proposed)': {'val_acc': 0.0, 'val_qwk': 0.0, 'test_acc': 0.0, 'test_qwk': 0.0},
-        }
-    generate_ssl_ablation_table(ssl_abl_results)
+        generate_ssl_ablation_table(ssl_abl_results)
+
+    # ===================================================================
+    # Generate Diffusion Ablation Table (if results exist)
+    # ===================================================================
+    diffusion_results = _load_results_dict('results/diffusion_ablation_results.npz')
+    if diffusion_results:
+        from src.evaluation.generate_tables import generate_diffusion_ablation_table
+        generate_diffusion_ablation_table(diffusion_results)
 
     # ===================================================================
     # 8. Generate training strategy ablation table (Table 3)
@@ -869,6 +901,8 @@ def run_xai(config, ablation, device, logger, timestamp):
         model_path = f'checkpoints/best_model_{ablation}.pth'
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+    if hasattr(model, 'fuse_reparam_blocks'):
+        model.fuse_reparam_blocks()
 
     # Collect one sample per DR grade (0-4)
     grade_samples = {}  # grade → (input_tensor, target)
@@ -960,14 +994,91 @@ def run_xai(config, ablation, device, logger, timestamp):
 
 
 
+def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None):
+    """Phase 2: freeze backbone+MSDA+HFF, re-train heads with class-balanced
+    sampling for a short schedule. Loads the existing best checkpoint,
+    saves to a distinct suffix so the original is never overwritten."""
+    # Force class-balanced sampling
+    decoupled_config_loader = {**config, "use_weighted_sampling": True}
+    train_loader, val_loader, _, _, class_weights, class_priors, cls_num_list = get_dataloaders(
+        decoupled_config_loader, fold_idx=fold_idx
+    )
+    model = create_model(config, ablation, device)
+    suffix = f"_fold{fold_idx}" if fold_idx is not None else ""
+    model.load_state_dict(torch.load(f'checkpoints/best_model_{ablation}{suffix}.pth', map_location=device))
+    model.freeze_all_except_heads()
+
+    decoupled_config = {
+        **config,
+        "epochs": config.get("decoupled_epochs", 12),
+        "lr": config.get("decoupled_lr", 3e-5),
+        "warmup_epochs": 1,
+        "use_swa": False,          # short phase, SWA not meaningful here
+        "patience": config.get("decoupled_epochs", 12),  # no early stop
+    }
+    criterion = create_criterion(decoupled_config, class_weights, device, class_priors=class_priors, cls_num_list=cls_num_list)
+    trainer = DRTrainer(model, train_loader, val_loader, criterion, device,
+                         decoupled_config, ablation=f"{ablation}_decoupled", fold_idx=fold_idx)
+    trainer.train()
+
+def run_pretrain_eyepacs_supervised(config, device, logger, timestamp):
+    """EyePACS-supervised pretraining — the missing SSL-ablation row."""
+    from src.data.eyepacs_supervised_dataset import build_eyepacs_supervised_dataset
+    from src.models.eyepacs_supervised_model import EyePACSSupervisedModel
+    from src.data.transforms import get_train_transforms, get_val_test_transforms
+    from sklearn.utils.class_weight import compute_class_weight
+    import numpy as np, torch.nn as nn
+
+    ssl_config = load_config(config.get('ssl_config', 'configs/config_ssl.yaml'))
+    img_size = ssl_config.get('ssl_img_size', 512)
+    dataset = build_eyepacs_supervised_dataset(ssl_config, get_train_transforms(img_size), img_size)
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=ssl_config.get('ssl_batch_size', 24), shuffle=True,
+        num_workers=ssl_config.get('ssl_num_workers', 8), pin_memory=True, drop_last=True
+    )
+
+    backbone_name = ssl_config.get('ssl_backbone', config.get('backbone'))
+    model = EyePACSSupervisedModel(backbone_name).to(device)
+
+    y_all = dataset.labels_df['diagnosis'].values
+    class_weights = torch.FloatTensor(
+        compute_class_weight('balanced', classes=np.unique(y_all), y=y_all)
+    ).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.5e-4, weight_decay=0.05)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=ssl_config.get('ssl_epochs', 50))
+
+    epochs = ssl_config.get('ssl_epochs', 50)
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for imgs, labels in loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            with torch.amp.autocast('cuda'):
+                out = model(imgs)
+                loss = criterion(out, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        scheduler.step()
+        logger.info(f"[EyePACS-supervised] Epoch {epoch+1}/{epochs} Loss: {running_loss/len(loader):.4f}")
+
+    os.makedirs('checkpoints', exist_ok=True)
+    model.save_backbone('checkpoints/eyepacs_supervised_backbone.pth')
+    logger.info("Saved checkpoints/eyepacs_supervised_backbone.pth")
+
 def main():
     parser = argparse.ArgumentParser(description="RetiNA-Net: Retinal DR Classification Project")
     parser.add_argument('--mode', type=str, required=True,
                         choices=['train', 'test', 'external_validation', 'xai',
-                                 'detect_lesions', 'pretrain', 'generate_results'],
+                                 'detect_lesions', 'pretrain', 'generate_results', 'decoupled_retrain',
+                                 'pretrain_eyepacs_supervised'],
                         help="Execution mode.")
     parser.add_argument('--ablation', type=str, default='proposed',
-                        choices=['baseline', 'msda_only', 'hff_only', 'proposed'],
+                        choices=['baseline', 'msda_only', 'hff_only', 'proposed',
+                                 'arch_baseline', 'arch_msda', 'arch_hff', 'arch_msda_hff',
+                                 'arch_attnpool', 'arch_auxhead', 'arch_full'],
                         help="Ablation configuration for the model.")
     parser.add_argument('--config', type=str, default='configs/config.yaml', help="Path to config.yaml")
     parser.add_argument('--fold', type=int, default=None,
@@ -1020,6 +1131,20 @@ def main():
 
         logger.info("Training complete.")
 
+    elif args.mode == 'decoupled_retrain':
+        use_kfold = config.get("use_kfold", True)
+        if use_kfold:
+            if args.fold is not None:
+                logger.info(f"Decoupled retrain single fold: {args.fold}")
+                run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=args.fold)
+            else:
+                n_folds = config.get("n_folds", 5)
+                for fold_idx in range(n_folds):
+                    logger.info(f"\n{'='*60}\nDecoupled retrain Fold {fold_idx + 1}/{n_folds}\n{'='*60}")
+                    run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=fold_idx)
+        else:
+            run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=None)
+
     elif args.mode == 'test':
         run_test(config, args.ablation, device, logger, timestamp)
 
@@ -1034,6 +1159,9 @@ def main():
 
     elif args.mode == 'pretrain':
         run_pretrain(config, device, logger, timestamp)
+
+    elif args.mode == 'pretrain_eyepacs_supervised':
+        run_pretrain_eyepacs_supervised(config, device, logger, timestamp)
 
     elif args.mode == 'generate_results':
         run_generate_results(config, logger, timestamp)

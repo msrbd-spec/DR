@@ -71,6 +71,67 @@ class MSDABlock(nn.Module):
         return out
 
 
+class RepProjConv(nn.Module):
+    """
+    Structural reparameterization (RepVGG/GCNet-style) applied to HFF's
+    stage-projection convolutions. During training, a k×k strided conv-BN
+    branch runs in parallel with a 1×1 strided conv-BN branch, summed.
+    At inference, fuse() folds both branches (+ BN affine params) into a
+    single k×k conv — no accuracy cost, fewer inference-time params/FLOPs.
+
+    NOTE: stride == kernel_size here (non-overlapping patchify conv), so
+    the 1×1 branch aligns with each patch's (0,0) corner, not a geometric
+    center — fusion adds the 1×1 weights into kernel tap (0,0) exactly
+    (see 05_repconv_reparam.md for the derivation).
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.fused = False
+
+        self.kxk_conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, bias=False)
+        self.kxk_bn = nn.BatchNorm2d(out_channels)
+        self.oxo_conv = nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False)
+        self.oxo_bn = nn.BatchNorm2d(out_channels)
+        self.fused_conv = None
+
+    def forward(self, x):
+        if self.fused:
+            return self.fused_conv(x)
+        return self.kxk_bn(self.kxk_conv(x)) + self.oxo_bn(self.oxo_conv(x))
+
+    @staticmethod
+    def _fuse_bn(conv, bn):
+        kernel = conv.weight
+        gamma, beta = bn.weight, bn.bias
+        mean, var, eps = bn.running_mean, bn.running_var, bn.eps
+        std = torch.sqrt(var + eps)
+        fused_kernel = kernel * (gamma / std).reshape(-1, 1, 1, 1)
+        fused_bias = beta - mean * gamma / std
+        return fused_kernel, fused_bias
+
+    @torch.no_grad()
+    def fuse(self):
+        """Call once after training (model should be in eval() mode so BN
+        running stats are what you expect), before inference/export."""
+        k_kernel, k_bias = self._fuse_bn(self.kxk_conv, self.kxk_bn)
+        o_kernel, o_bias = self._fuse_bn(self.oxo_conv, self.oxo_bn)
+
+        fused_kernel = k_kernel.clone()
+        fused_kernel[:, :, 0, 0] += o_kernel[:, :, 0, 0]
+        fused_bias = k_bias + o_bias
+
+        self.fused_conv = nn.Conv2d(
+            self.kxk_conv.in_channels, self.kxk_conv.out_channels,
+            self.kernel_size, stride=self.stride, bias=True
+        ).to(fused_kernel.device)
+        self.fused_conv.weight.copy_(fused_kernel)
+        self.fused_conv.bias.copy_(fused_bias)
+        self.fused = True
+
+
 class HFFBlock(nn.Module):
     """
     Hierarchical Feature Fusion Block with learnable gating across all 4 stages.
@@ -90,17 +151,19 @@ class HFFBlock(nn.Module):
       6. Output projection: 2-layer MLP per spatial location
     """
 
-    def __init__(self, stage_channels=(192, 384, 768, 1536), target_channels=1536):
+    def __init__(self, stage_channels=(192, 384, 768, 1536), target_channels=1536, use_rep_proj: bool = False):
         super().__init__()
         self.target_channels = target_channels
 
         # Projection convs: each stage → target_channels, downsample to stage4 resolution
-        # Stage 1: 192ch → 1536ch (stride 8)
-        self.proj_stage1 = nn.Conv2d(stage_channels[0], target_channels, kernel_size=8, stride=8)
-        # Stage 2: 384ch → 1536ch (stride 4)
-        self.proj_stage2 = nn.Conv2d(stage_channels[1], target_channels, kernel_size=4, stride=4)
-        # Stage 3: 768ch → 1536ch (stride 2)
-        self.proj_stage3 = nn.Conv2d(stage_channels[2], target_channels, kernel_size=2, stride=2)
+        if use_rep_proj:
+            self.proj_stage1 = RepProjConv(stage_channels[0], target_channels, kernel_size=8, stride=8)
+            self.proj_stage2 = RepProjConv(stage_channels[1], target_channels, kernel_size=4, stride=4)
+            self.proj_stage3 = RepProjConv(stage_channels[2], target_channels, kernel_size=2, stride=2)
+        else:
+            self.proj_stage1 = nn.Conv2d(stage_channels[0], target_channels, kernel_size=8, stride=8)
+            self.proj_stage2 = nn.Conv2d(stage_channels[1], target_channels, kernel_size=4, stride=4)
+            self.proj_stage3 = nn.Conv2d(stage_channels[2], target_channels, kernel_size=2, stride=2)
         # Stage 4: already target_channels — no projection needed
 
         # LayerNorm on channel dimension for each stage

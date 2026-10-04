@@ -24,7 +24,7 @@ class DRDataset(Dataset):
     the double-resize quality degradation present in the original code.
     """
 
-    def __init__(self, image_dir: str, labels_df: pd.DataFrame, transform=None, img_size: int = 384):
+    def __init__(self, image_dir: str, labels_df: pd.DataFrame, transform=None, img_size: int = 384, fda_pool=None, fda_prob: float = 0.0, fda_beta: float = 0.01):
         """
         Args:
             image_dir (str): Path to the directory containing images.
@@ -36,6 +36,9 @@ class DRDataset(Dataset):
         self.labels_df = labels_df
         self.transform = transform
         self.img_size = img_size
+        self.fda_pool = fda_pool
+        self.fda_prob = fda_prob
+        self.fda_beta = fda_beta
 
     def __len__(self):
         return len(self.labels_df)
@@ -134,6 +137,14 @@ class DRDataset(Dataset):
 
             # Step 3: Ben Graham's luminosity normalisation
             img = self._apply_ben_graham(img)
+
+            # P4: FDA style augmentation — only applied to training data (fda_pool
+            # is None for val/test/external datasets, so this is a no-op there)
+            if self.fda_pool and np.random.random() < self.fda_prob:
+                import random
+                target_img = random.choice(self.fda_pool)
+                from .fda_augmentation import fda_source_to_target
+                img = fda_source_to_target(img, target_img, beta=self.fda_beta)
 
         # 4. Convert to RGB (Albumentations expects RGB)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

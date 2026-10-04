@@ -30,6 +30,34 @@ class FocalLoss(nn.Module):
         return focal_loss
 
 
+class LDAMLoss(nn.Module):
+    """
+    Label-Distribution-Aware Margin loss (Cao et al., NeurIPS 2019).
+    Enforces a larger decision margin for minority classes. Intended to be
+    used in place of FocalLoss (select via config `loss_type: "ldam"`),
+    typically paired with the DRW schedule (Item 2).
+    """
+
+    def __init__(self, cls_num_list, max_margin=0.5, scale=30.0, label_smoothing=0.0):
+        super().__init__()
+        cls_num = torch.tensor(cls_num_list, dtype=torch.float32)
+        margins = 1.0 / torch.sqrt(torch.sqrt(cls_num))
+        margins = margins * (max_margin / margins.max())
+        self.register_buffer('margins', margins)
+        self.scale = scale
+        self.label_smoothing = label_smoothing
+
+    def forward(self, inputs, targets, weights=None):
+        index = torch.zeros_like(inputs, dtype=torch.bool)
+        index.scatter_(1, targets.view(-1, 1), True)
+        batch_margins = self.margins[targets].unsqueeze(1).to(inputs.device)
+        adjusted = inputs - index.float() * batch_margins
+        return F.cross_entropy(
+            self.scale * adjusted, targets, weight=weights,
+            label_smoothing=self.label_smoothing
+        )
+
+
 class OrdinalLoss(nn.Module):
     """
     Ordinal regression loss using cumulative link model.
@@ -76,7 +104,9 @@ class CombinedLoss(nn.Module):
 
     def __init__(self, class_weights, device, label_smoothing=0.0,
                  use_ordinal=True, ordinal_loss_weight=0.3, num_classes=5,
-                 focal_gamma=1.5, use_aux=True, aux_loss_weight=0.2):
+                 focal_gamma=1.5, use_aux=True, aux_loss_weight=0.2,
+                 class_priors=None, use_logit_adjustment=False, logit_adjustment_tau=1.0,
+                 loss_type="focal", cls_num_list=None, ldam_max_margin=0.5, ldam_scale=30.0):
         super(CombinedLoss, self).__init__()
 
         # Device placement for class weights
@@ -84,7 +114,21 @@ class CombinedLoss(nn.Module):
             class_weights = torch.FloatTensor(class_weights)
         self.class_weights = class_weights.to(device)
 
-        self.focal_loss = FocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing)
+        self.use_logit_adjustment = use_logit_adjustment
+        self.logit_adjustment_tau = logit_adjustment_tau
+        if use_logit_adjustment and class_priors is not None:
+            log_priors = torch.log(class_priors.clamp(min=1e-12)).to(device)
+            self.register_buffer('log_priors', log_priors)
+        else:
+            self.log_priors = None
+
+        self.loss_type = loss_type
+        if loss_type == "ldam":
+            assert cls_num_list is not None, "LDAM requires cls_num_list (per-class train counts)"
+            self.focal_loss = LDAMLoss(cls_num_list, max_margin=ldam_max_margin,
+                                        scale=ldam_scale, label_smoothing=label_smoothing)
+        else:
+            self.focal_loss = FocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing)
         self.use_ordinal = use_ordinal
         self.use_aux = use_aux
 
@@ -94,6 +138,14 @@ class CombinedLoss(nn.Module):
 
         if use_aux:
             self.aux_loss_weight = aux_loss_weight
+
+    def set_reweighting(self, enabled: bool):
+        """DRW hook: call from the trainer at the epoch boundary. When
+        disabled, the focal loss uses uniform (None) class weights."""
+        self._reweighting_enabled = enabled
+
+    def _active_class_weights(self):
+        return self.class_weights if getattr(self, '_reweighting_enabled', True) else None
 
     def forward(self, pred, targets):
         """
@@ -115,14 +167,19 @@ class CombinedLoss(nn.Module):
             aux_logits = None
             ordinal_logits = None
 
+        if self.use_logit_adjustment and self.log_priors is not None:
+            logits = logits - self.logit_adjustment_tau * self.log_priors.unsqueeze(0)
+            if aux_logits is not None:
+                aux_logits = aux_logits - self.logit_adjustment_tau * self.log_priors.unsqueeze(0)
+
         # Focal loss with class weights (main classification head)
-        cls_loss = self.focal_loss(logits, targets, weights=self.class_weights)
+        cls_loss = self.focal_loss(logits, targets, weights=self._active_class_weights())
 
         total_loss = cls_loss
 
         # Auxiliary loss (deep supervision)
         if self.use_aux and aux_logits is not None:
-            aux_loss = self.focal_loss(aux_logits, targets, weights=self.class_weights)
+            aux_loss = self.focal_loss(aux_logits, targets, weights=self._active_class_weights())
             total_loss = total_loss + self.aux_loss_weight * aux_loss
 
         # Ordinal loss
