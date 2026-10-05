@@ -128,19 +128,24 @@ before `forward`):
     def _freeze_backbone_stages(self, num_stages: int):
         """
         Freeze the patch embedding and the first `num_stages` SwinV2 stages
-        (0-indexed: layers.0 .. layers.3). Later stages and all custom
-        heads stay trainable. Confirmed module path 'backbone.layers.{i}'
-        from src/evaluation/xai.py's get_target_layer().
+        (0-indexed: layers_0 .. layers_3). Later stages and all custom
+        heads stay trainable. Compatible with timm>=1.0.30 where FeatureListNet
+        uses layers_0, layers_1, etc. instead of layers[i].
         """
-        num_stages = min(num_stages, len(self.backbone.layers))
+        # SwinV2 has 4 stages (layers_0 to layers_3)
+        num_stages = min(num_stages, 4)
 
-        if hasattr(self.backbone, 'patch_embed'):
-            for p in self.backbone.patch_embed.parameters():
+        # Freeze patch_embed if exists (accessed via backbone.model in some timm versions)
+        if hasattr(self.backbone, 'model') and hasattr(self.backbone.model, 'patch_embed'):
+            for p in self.backbone.model.patch_embed.parameters():
                 p.requires_grad_(False)
 
+        # Freeze stages using layers_0, layers_1, etc. (timm 1.0.30+ FeatureListNet format)
         for i in range(num_stages):
-            for p in self.backbone.layers[i].parameters():
-                p.requires_grad_(False)
+            layer_attr = f'layers_{i}'
+            if hasattr(self.backbone, layer_attr):
+                for p in getattr(self.backbone, layer_attr).parameters():
+                    p.requires_grad_(False)
 
         frozen = sum(p.numel() for p in self.backbone.parameters() if not p.requires_grad)
         total = sum(p.numel() for p in self.backbone.parameters())

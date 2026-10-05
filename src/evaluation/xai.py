@@ -45,7 +45,8 @@ def get_target_layer(model):
     last_norm_name = None
     last_norm_module = None
     for name, module in model.named_modules():
-        if 'backbone.layers.3.blocks' in name and 'norm2' in name:
+        # Support both timm<1.0.30 (layers.3) and timm>=1.0.30 (layers_3) formats
+        if ('backbone.layers.3.blocks' in name or 'backbone.layers_3.blocks' in name) and 'norm2' in name:
             last_norm_name = name
             last_norm_module = module
 
