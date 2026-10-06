@@ -143,3 +143,35 @@ ldam_scale: 30.0
 3. **Decision:** Keep Step A+B combination, or revert to Step A only
 4. **Continue:** Steps C and D
 5. **Final:** Decoupled re-training on best combination
+
+# Claude Response:
+Systematic approach-ta thik ache (ablation track kora, table maintain kora) — kintu **3-ta real issue** paicchi je trust kora-r age fix/verify kora dorkar. Line-by-line:
+
+## 1. `arch_full` sabcheye kharap, `arch_baseline` sabcheye valo — eta flag kora dorkar, accept kora na
+
+Single-fold table-e: `arch_full` (82.24%, QWK 0.8992) = **sabcheye kharap**, `arch_baseline` (84.97%, QWK 0.9253) = **sabcheye valo**. Eta pura paper-er premise-ke contradict kore (MSDA+HFF-i to headline novelty).
+
+**Important clue:** `proposed` 5-fold ensemble = 84.97%, kintu `arch_full` single-fold = 82.24% — **2.73-point gap**, jekhane duitar config literally identical (MSDA+HFF+AttnPool+Aux+Ordinal shob ON). Mane complex architecture-ta **ensemble chara highly unstable** hote pare — fold-0-er particular random split-e kharap pore geche, kintu 5-fold average-e thik hoye jay. Eta ekta **legitimate, reportable finding** (architecture high-variance, needs ensembling) — kintu "architecture kharap" bole conclude kora **premature**।
+
+**Next step (age eta koro, Phase 3-e jawar age na):**
+- `arch_baseline` ar `arch_full` — duitar training log-e check koro **ki epoch-e early-stop hoyeche**, ar kono crash/warning silently hoyeche kina
+- Possible: ekta 2nd seed/fold diye dutai repeat koro — jodi gap close hoye jay, eta noise chilo; na hoile eta real pattern, paper-e "architecture components benefit from ensembling" hisebe explicitly report korte hobe
+
+## 2. `proposed` P1-fix-er por SLIGHTLY kharap hoyeche (85.25% → 84.97%, QWK 0.9276 → 0.9192)
+
+Eta tomar **sabcheye valo model**-e hoyeche, sabcheye concerning. Possible karon ami age bolechilam: `freeze_backbone_stages: 2` + `mix_prob: 0.4` + CoarseDropout — ei combined regularization-e model-er converge korte **beshi epoch lagte pare**, kintu `patience: 25` same roye geche. **Check koro:** notun `proposed` run-er log-e best-checkpoint-save-hoya epoch number ta — jodi purono run-er (54 epoch) cheye onek aage thame geche, eta-i culprit. Fix: `patience` 25→35-40 koro, rerun koro.
+
+## 3. **Sabcheye critical bug — Phase 3 Step A-er test protocol mismatched**
+
+Table-e likhecho: *"Training: Single-fold (fold 0)... Test: 5-fold ensemble"*. **Eita problem.** Jodi sudhu fold-0 checkpoint-e Logit Adjustment diye retrain korecho, kintu test "5-fold ensemble" mode-e run disho — tahole test actually load korche **fold-0 (notun, logit-adjustment-soho) + fold-1,2,3,4 (purono, logit-adjustment chara)** — ekta **Frankenstein mixed ensemble**। Tomar "+0.28% accuracy, Severe F1 +0.06" result eta theke ashte pare, **actual Logit Adjustment-er effect theke na**।
+
+**Fix:** Phase 3-er protocol consistently single-fold rakhte hobe **duitai** — train `--fold 0` (already korecho) ar test-o single-fold mode-e (`ensemble_folds: False` config-e set kore, ba ensemble logic bypass kore just fold-0 checkpoint evaluate kora)। 5-fold ensemble test shudhu **final winning combination**-er jonno (Phase 8-er age), proti ablation step-er jonno na — commands.md-e eta-i intended chilo, miscommunicate hoye gechilo mone hocche।
+
+**Step A-ke redo/re-verify koro ei fix soho, tarpor-i Step B-e jaw** — noile B/C/D-o same bug carry kore jabe.
+
+---
+
+**Summary: taratari egochho, kintu ei 3-ta methodological gap fix na kore egiye gele je number-gula pacho shegula misleading hote pare.** Fix korar por-i decide koro Step B-e jaba naki na.
+
+---
+**`run_helper.md`** — unchanged, no code modified this session.
