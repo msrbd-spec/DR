@@ -1,0 +1,46 @@
+blood_cell_project/
+│
+├── 1_raw_datasets/
+│   ├── TXL_PBC/
+│   ├── CBC/
+│   ├── BCCD/
+│   └── WBC_external/
+│
+├── 2_processed_datasets/
+│   ├── merged_pretrain/
+│   │    ├── images/
+│   │    │    ├── train/
+│   │    │    └── val/
+│   │    └── annotations/
+│   │         ├── train.json
+│   │         └── val.json
+│   │
+│   ├── bccd_finetune/
+│   │    ├── images/
+│   │    └── annotations/
+│   │
+│   └── wbc_test/
+│        ├── images/
+│        └── annotations/
+│
+├── 3_models/
+│   ├── stage1_pretrained/
+│   ├── stage2_finetuned/
+│   └── checkpoints/
+│
+├── 4_experiments/
+│   ├── baseline/
+│   ├── +attention/
+│   ├── +domain_branch/
+│   └── full_model/
+│
+├── 5_logs/
+│
+├── 6_scripts/
+│   ├── dataset_merge.py
+│   ├── train_stage1.py
+│   ├── train_stage2.py
+│   ├── evaluate_external.py
+│   └── utils.py
+│
+└── README.md
