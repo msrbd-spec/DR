@@ -1,5 +1,18 @@
 # P3 — Ablation Harness Extension
 
+## ⚠️ SCOPE NOTE — read before implementing
+**Part A and Part B below are ALREADY IMPLEMENTED and verified correct in
+the current codebase** (ARCHITECTURE_ABLATIONS registry, resolve_ablation_flags,
+all 3 call sites, argparse choices, EyePACSSupervisedModel, the dataset
+builder, and the pretrain_eyepacs_supervised mode — all confirmed present
+and working). **Do NOT re-implement Part A/B — only verify they match this
+spec if asked, but the actual new work is the two "Addendum" sections at
+the bottom** (folder-structured checkpoints/logs, and the mix_prob
+diagnostic note). Line numbers cited in Part A (e.g. "line 72-74", "line
+~197", "line ~970") are from an EARLIER repo state and will not match the
+current file — if you do need to locate code, match by the quoted code
+snippets' content, not the line numbers.
+
 ## Objective
 Today, `get_ablation_flags()` (`main.py` line 59) only toggles
 `use_msda`/`use_hff`; `use_attention_pool`, `use_aux_head`,
@@ -19,21 +32,22 @@ hff_only/proposed results).
 
 ## Part A — Architecture ablation (full 5-flag combo)
 
-### Design clarification on the 8-row table
-The originally planned table's last two rows ("+Ordinal" and "Full
-(Proposed)") have identical checkmarks (✓✓✓✓✓) — they're the same
-configuration at two different **evaluation protocols**:
-- Row 7 "+Ordinal" → single-fold, no-ensemble ablation protocol (fast,
-  comparable to the other ablation rows)
-- Row 8 "Full (Proposed)" → the full 5-fold ensemble + multi-scale TTA
-  protocol (the paper's headline number)
+### Design clarification (REVISED — all 7 rows now run 5-fold)
+Originally this table used a mixed protocol (single-fold for rows 1-6,
+full 5-fold ensemble reused from `proposed` for row 7/8) to save compute
+under a tight deadline. **Revised: with more runway available, every row
+runs the full 5-fold ensemble protocol** — this removes the confusing
+"same config, different number, needs a footnote" situation entirely, and
+turns the `arch_full` vs `arch_baseline` single-fold anomaly (observed in
+practice — arch_full scored worst of 7, arch_baseline scored best) into
+either a resolved non-issue (if 5-fold averaging closes the gap) or a
+genuine, now-trustworthy finding worth reporting directly, instead of a
+noise-vs-signal question hanging over a single-fold number.
 
-So only **7 distinct configurations** need to be defined; row 8 reuses row
-7's config through the existing full-ensemble `test` pipeline. Conveniently,
-row 7's flags (`msda=hff=attnpool=auxhead=ordinal=True`) are **already
-exactly what `proposed` uses today** (since config.yaml currently applies
-those three heads unconditionally) — so the existing `proposed` 5-fold
-logs already ARE row 8, no rerun needed. Only rows 1–6 are new.
+Only **7 distinct configurations** are defined (see `ARCHITECTURE_ABLATIONS`
+below); `arch_full`'s flags are identical to `proposed`'s, so its 5-fold
+result should match `proposed`'s 5-fold result directly — if it doesn't,
+that's a pipeline bug worth catching, not a protocol-difference footnote.
 
 ### `main.py` — new ablation registry
 Add near `get_ablation_flags` (after line 69, before `create_model`):
@@ -99,25 +113,27 @@ same replacement — both currently do
                         help="Ablation configuration for the model.")
 ```
 
-### Execution protocol
-Run rows 1–6 single-fold only:
+### Execution protocol (REVISED — full 5-fold for all 7 rows)
+Per the full-rerun decision, train all 5 folds fresh for each config
+(matches `commands.md` Phase 2 exactly — do not mix with any older
+fold-0-only checkpoint from a prior partial run):
 ```bash
-python main.py --mode train --ablation arch_baseline --fold 0
-python main.py --mode train --ablation arch_msda --fold 0
-python main.py --mode train --ablation arch_hff --fold 0
-python main.py --mode train --ablation arch_msda_hff --fold 0
-python main.py --mode train --ablation arch_attnpool --fold 0
-python main.py --mode train --ablation arch_auxhead --fold 0
+for ablation in arch_baseline arch_msda arch_hff arch_msda_hff arch_attnpool arch_auxhead arch_full; do
+  for fold in 0 1 2 3 4; do
+    python main.py --mode train --ablation $ablation --fold $fold
+  done
+done
 ```
-Then test each the same way the existing single-fold-style evaluation is
-done (note: `run_test`'s ensemble path expects all 5 fold checkpoints by
-default — for single-fold ablation rows, either (a) set
-`ensemble_folds: False` in a per-run config override and point
-`model_path` logic at the fold-0 checkpoint, or (b) temporarily set
-`n_folds: 1` for these runs. Document whichever is chosen consistently
-across all 6 rows so the comparison is apples-to-apples.)
-Row 7 (`arch_full`) and the existing `proposed` 5-fold results are
-identical by construction — reuse, don't rerun.
+Then test normally (standard 5-fold ensemble path, no `ensemble_folds`
+override needed):
+```bash
+for ablation in arch_baseline arch_msda arch_hff arch_msda_hff arch_attnpool arch_auxhead arch_full; do
+  python main.py --mode test --ablation $ablation
+done
+```
+`arch_full`'s result should now match `proposed`'s 5-fold result closely
+(identical config, identical protocol) — treat any persistent mismatch as
+a pipeline bug to investigate, not something to footnote away.
 
 ---
 
@@ -250,3 +266,84 @@ mechanism (every `test` run auto-appends its metrics to the relevant
 results file instead of requiring manual npz edits) is specified in P7 —
 this phase only needs to make the 5th row's data *obtainable*; P7 makes it
 *automatic*.
+
+---
+
+## Addendum — Folder-structured checkpoints/logs (repo-wide, added per user request)
+**Note: this affects P1 through P7, not just architecture ablation — it's
+documented here because this is where the checkpoint-naming complexity
+became unmanageable (11+ configs × 5 folds = 55+ flat files), but the
+fix applies everywhere `checkpoints/` or `logs/` paths are constructed.**
+
+### New file: `src/utils/paths.py`
+```python
+import os
+
+
+def get_checkpoint_path(ablation: str, fold: int = None, create_dir: bool = True) -> str:
+    """
+    checkpoints/{ablation}/fold{N}.pth  (or model.pth if fold is None).
+    Replaces the old flat checkpoints/best_model_{ablation}_fold{N}.pth
+    naming — same info, folder-per-config instead of one giant flat dir.
+    """
+    folder = os.path.join('checkpoints', ablation)
+    if create_dir:
+        os.makedirs(folder, exist_ok=True)
+    filename = f'fold{fold}.pth' if fold is not None else 'model.pth'
+    return os.path.join(folder, filename)
+
+
+def get_log_path(mode: str, ablation: str, timestamp: str, create_dir: bool = True) -> str:
+    """logs/{ablation}/{mode}_{timestamp}.log"""
+    folder = os.path.join('logs', ablation)
+    if create_dir:
+        os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f'{mode}_{timestamp}.log')
+```
+
+### Wire into existing save/load points
+- `src/training/trainer.py` — every `torch.save(..., f'checkpoints/best_model_{self.ablation}{suffix}.pth')`
+  (both the EMA-best save and the SWA-override save in `train()`) →
+  `torch.save(..., get_checkpoint_path(self.ablation, fold=self.fold_idx))`
+- `main.py` `run_test` / `run_external_validation` — `model_paths = [f'checkpoints/best_model_{ablation}_fold{f}.pth' for f in range(n_folds)]`
+  → `model_paths = [get_checkpoint_path(ablation, fold=f, create_dir=False) for f in range(n_folds)]`
+  (filter to existing paths the same way as before)
+- `main.py` `run_xai` — same substitution for its single `model_path`
+- `main.py` `run_decoupled_retrain` (P2) — load path uses
+  `get_checkpoint_path(ablation, fold=fold_idx, create_dir=False)`;
+  save naturally goes to `checkpoints/{ablation}_decoupled/fold{N}.pth`
+  via the existing `ablation=f"{ablation}_decoupled"` naming passed to `DRTrainer`
+- `main.py` `main()` — `log_file_path = os.path.join('logs', f'{args.mode}_{args.ablation}_{timestamp}.log')`
+  → `log_file_path = get_log_path(args.mode, args.ablation, timestamp)`
+
+### Note on existing checkpoints
+If re-running everything from scratch (as planned), no migration needed —
+the new structure populates naturally on the fresh runs. If any existing
+flat-structure checkpoint needs preserving, migrate with:
+```bash
+cd checkpoints
+for f in best_model_*_fold*.pth; do
+  base="${f%.pth}"; base="${base#best_model_}"
+  fold="${base##*_fold}"; ablation="${base%_fold*}"
+  mkdir -p "$ablation"
+  mv "$f" "$ablation/fold${fold}.pth"
+done
+```
+
+---
+
+## Addendum — Diagnostic for the `proposed` post-P1 regression (85.25%→84.97%)
+**Observed in practice, not yet resolved.** In addition to checking the
+early-stop epoch (already flagged), add a diagnostic run reducing
+Mixup/CutMix strength — P1 raised `mix_prob` 0.2→0.4 at the same time as
+adding backbone freezing + CoarseDropout + (optionally) SAM, so the
+*combined* regularization may now be too aggressive, not any single piece:
+```yaml
+mix_prob: 0.1   # diagnostic — try low/near-zero to isolate whether
+                 # P1's combined regularization overshot
+```
+Keep `patience: 25` unchanged (user decision — review logs before
+touching this). Run one fold with `mix_prob: 0.1` and one with `0.0`,
+compare val QWK trajectory against the `mix_prob: 0.4` run's log — this
+isolates whether Mixup/CutMix specifically is the regression's cause
+before concluding anything.

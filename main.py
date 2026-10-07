@@ -13,6 +13,7 @@ import datetime
 import numpy as np
 
 from src.utils.logger import setup_logger
+from src.utils.paths import get_checkpoint_path, get_log_path
 from src.data.datamodule import get_dataloaders
 from src.models.dr_model import RetiNA_Net
 from src.models.components import OrdinalRegressionHead
@@ -227,7 +228,7 @@ def run_test(config, ablation, device, logger, timestamp):
 
     if use_kfold and ensemble_folds:
         # Ensemble inference across K-fold models
-        model_paths = [f'checkpoints/best_model_{ablation}_fold{f}.pth' for f in range(n_folds)]
+        model_paths = [get_checkpoint_path(ablation, fold=f, create_dir=False) for f in range(n_folds)]
         model_paths = [p for p in model_paths if os.path.exists(p)]
 
         if len(model_paths) == 0:
@@ -268,7 +269,7 @@ def run_test(config, ablation, device, logger, timestamp):
     else:
         # Single model inference
         model = create_model(config, ablation, device)
-        model_path = f'checkpoints/best_model_{ablation}.pth'
+        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
         if hasattr(model, 'fuse_reparam_blocks'):
@@ -348,7 +349,7 @@ def run_external_validation(config, ablation, device, logger, timestamp):
     ensemble_folds = config.get("ensemble_folds", True)
 
     if use_kfold and ensemble_folds:
-        model_paths = [f'checkpoints/best_model_{ablation}_fold{f}.pth' for f in range(n_folds)]
+        model_paths = [get_checkpoint_path(ablation, fold=f, create_dir=False) for f in range(n_folds)]
         model_paths = [p for p in model_paths if os.path.exists(p)]
 
         if len(model_paths) == 0:
@@ -387,7 +388,7 @@ def run_external_validation(config, ablation, device, logger, timestamp):
         )
     else:
         model = create_model(config, ablation, device)
-        model_path = f'checkpoints/best_model_{ablation}.pth'
+        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
         if hasattr(model, 'fuse_reparam_blocks'):
@@ -884,9 +885,9 @@ def run_xai(config, ablation, device, logger, timestamp):
     model = create_model(config, ablation, device)
 
     # Try to load fold 0 model, fall back to single model
-    model_path = f'checkpoints/best_model_{ablation}_fold0.pth'
+    model_path = get_checkpoint_path(ablation, fold=0, create_dir=False)
     if not os.path.exists(model_path):
-        model_path = f'checkpoints/best_model_{ablation}.pth'
+        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     if hasattr(model, 'fuse_reparam_blocks'):
@@ -992,8 +993,8 @@ def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None):
         decoupled_config_loader, fold_idx=fold_idx
     )
     model = create_model(config, ablation, device)
-    suffix = f"_fold{fold_idx}" if fold_idx is not None else ""
-    model.load_state_dict(torch.load(f'checkpoints/best_model_{ablation}{suffix}.pth', map_location=device))
+    model_path = get_checkpoint_path(ablation, fold=fold_idx, create_dir=False)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.freeze_all_except_heads()
 
     decoupled_config = {
@@ -1083,7 +1084,7 @@ def main():
     os.makedirs('checkpoints', exist_ok=True)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_path = os.path.join('logs', f'{args.mode}_{args.ablation}_{timestamp}.log')
+    log_file_path = get_log_path(args.mode, args.ablation, timestamp)
 
     logger = setup_logger(log_file=log_file_path)
     logger.info(f"Starting execution in mode: {args.mode}, ablation: {args.ablation}")

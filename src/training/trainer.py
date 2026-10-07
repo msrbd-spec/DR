@@ -17,6 +17,7 @@ os.makedirs('checkpoints', exist_ok=True)
 from ..evaluation.metrics import compute_metrics
 from .mixup import apply_mixup_or_cutmix, mixup_criterion
 from .sam import SAM
+from src.utils.paths import get_checkpoint_path
 
 logger = logging.getLogger(__name__)
 
@@ -441,8 +442,7 @@ class DRTrainer:
 
                 # Save EMA model
                 save_model = self.ema.ema_model if self.use_ema else self.model
-                suffix = f"_fold{self.fold_idx}" if self.fold_idx is not None else ""
-                torch.save(save_model.state_dict(), f'checkpoints/best_model_{self.ablation}{suffix}.pth')
+                torch.save(save_model.state_dict(), get_checkpoint_path(self.ablation, fold=self.fold_idx))
                 logger.info(f"New best model saved at epoch {epoch+1} with QWK {val_qwk:.4f}")
             else:
                 self.epochs_without_improvement += 1
@@ -463,8 +463,7 @@ class DRTrainer:
             # If SWA is better, save it
             if swa_val_metrics['qwk'] > self.best_val_qwk:
                 logger.info(f"SWA model outperforms best EMA model (QWK: {swa_val_metrics['qwk']:.4f} > {self.best_val_qwk:.4f})")
-                suffix = f"_fold{self.fold_idx}" if self.fold_idx is not None else ""
-                torch.save(self.swa.swa_model.state_dict(), f'checkpoints/best_model_{self.ablation}{suffix}.pth')
+                torch.save(self.swa.swa_model.state_dict(), get_checkpoint_path(self.ablation, fold=self.fold_idx))
                 self.best_val_qwk = swa_val_metrics['qwk']
 
         return train_losses, val_losses, train_accs, val_accs
