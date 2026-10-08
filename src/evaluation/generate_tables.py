@@ -49,6 +49,9 @@ def compute_all_metrics(y_true, y_pred, y_prob=None, num_classes=5):
     metrics['recall_macro'] = recall_score(y_true, y_pred, average='macro', zero_division=0)
     metrics['f1_macro'] = f1_score(y_true, y_pred, average='macro', zero_division=0)
     metrics['f1_weighted'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+    f1_classes = f1_score(y_true, y_pred, average=None, labels=range(num_classes), zero_division=0)
+    for i, f1_c in enumerate(f1_classes):
+        metrics[f'f1_class{i}'] = f1_c
     metrics['qwk'] = cohen_kappa_score(y_true, y_pred, weights='quadratic')
     metrics['kappa'] = cohen_kappa_score(y_true, y_pred, weights=None)
 
@@ -73,7 +76,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None, num_classes=5):
     return metrics
 
 
-def generate_architecture_ablation_table(results, output_dir='results/tables'):
+def generate_architecture_ablation_table(results, output_dir='results/tables', filename='ablation_architecture.csv'):
     """
     Table 1: Architecture ablation table.
 
@@ -98,7 +101,7 @@ def generate_architecture_ablation_table(results, output_dir='results/tables'):
         })
 
     df = pd.DataFrame(rows)
-    path = os.path.join(output_dir, 'ablation_architecture.csv')
+    path = os.path.join(output_dir, filename)
     df.to_csv(path, index=False)
     print(f"Saved: {path}")
     return df
@@ -149,6 +152,8 @@ def generate_training_ablation_table(results, output_dir='results/tables'):
             'Test QWK': fmt(m.get('test_qwk', 0)),
             'Test F1 (%)': fmt(m.get('test_f1', 0) * 100),
             'Test AUC': fmt(m.get('test_auc', 0)),
+            'Severe F1 (%)': fmt(m.get('test_f1_class3', 0) * 100),
+            'Proliferative F1 (%)': fmt(m.get('test_f1_class4', 0) * 100),
         })
 
     df = pd.DataFrame(rows)

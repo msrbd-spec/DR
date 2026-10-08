@@ -322,4 +322,7 @@ class SSLTrainer:
         save_path = os.path.join('results', 'ssl_loss_history.npz')
         os.makedirs('results', exist_ok=True)
         np.savez(save_path, **dict(self.loss_history))
-        self.logger.info(f"SSL loss history saved to {save_path}")
+        
+        local_save_path = os.path.join(self.save_dir, 'ssl_loss_history.npz')
+        np.savez(local_save_path, **dict(self.loss_history))
+        self.logger.info(f"SSL loss history saved to {save_path} and {local_save_path}")

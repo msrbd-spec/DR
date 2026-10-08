@@ -1,229 +1,151 @@
-# commands.md — Complete Sequential Run Guide (REVISED: everything 5-fold)
+# commands.md — Full run order (every experiment = ONE command, no loops, no config.yaml edits)
 
-## Standing rule (prevents the Phase-3-Step-A bug from recurring)
-**Before running any `test`/`external_validation` command, confirm all 5
-fold checkpoints exist for that exact config** (`checkpoints/{ablation}/fold0.pth`
-through `fold4.pth`, or `checkpoints/{ablation}_decoupled/fold0.pth`..`fold4.pth`
-for decoupled runs). If even one fold is missing/stale (e.g. only fold 0
-retrained with a new loss setting, folds 1-4 still from an older config),
-the ensemble will silently mix inconsistent models and the result is
-invalid. This is why every phase below trains all 5 folds before testing
-— no more single-fold shortcuts anywhere in this document.
-
-## Checkpoint/log layout (after `03_ablation_harness.md`'s addendum is implemented)
-```
-checkpoints/{ablation}/fold0.pth ... fold4.pth
-checkpoints/{ablation}_decoupled/fold0.pth ... fold4.pth
-checkpoints/ssl_pretrained_backbone.pth          (top-level, not per-ablation)
-checkpoints/eyepacs_supervised_backbone.pth      (top-level)
-logs/{ablation}/{mode}_{timestamp}.log
-```
+How it works (after `plan/03_ablation_harness.md` is implemented):
+- `--ablation X` picks the architecture. `--tag T` names the run (`X__T`) so nothing is overwritten.
+- `--set k=v ...` changes config for that run only. The final config is saved as `checkpoints/<run>/config_snapshot.yaml`.
+- `train` / `decoupled_retrain` without `--fold` run all 5 folds in the one command.
+- `test` / `external_validation` / `xai` automatically restore the config of the run they evaluate. They need all 5 folds trained first.
+- `--inherit T` = start from the saved config of run `X__T`, then apply `--set`. This replaces "lock the winner in config.yaml".
+- Independent commands can run in parallel on different GPUs: `CUDA_VISIBLE_DEVICES=1 python main.py ...`
+- Never start a `test`/`external_validation` for a run until its `train` command has fully finished.
+- `configs/config.yaml` is never edited. Defaults must stay: use_sam false, use_logit_adjustment false, use_drw false,
+  class_weight_strategy inverse, loss_type focal, use_fda false, use_rep_proj false, freeze_backbone_stages 2, mix_prob 0.4.
 
 ---
-
-## Phase 0 — Fix the merge bug + folder-structure change, sanity check
+## Phase -1 — Agent work first (once)
+Give the agent `plan/03_ablation_harness.md` (prompt in chat), then run:
 ```bash
 python -c "import ast; ast.parse(open('main.py').read())" && echo "main.py OK"
 python test_model.py
 ```
+Also confirm `07c_merge_fix.md` is applied (main.py must parse).
 
-## Phase 1 — SSL backbone (SKIP — already done with old code)
-```bash
-# python main.py --mode detect_lesions     # SKIP
-# python main.py --mode pretrain            # SKIP
-```
-```yaml
-# configs/config.yaml — confirm (should already be set):
-ssl_pretrained_path: "checkpoints/ssl_pretrained_backbone.pth"
-```
+## Phase 1 — SSL backbone: SKIP (already done)
+`detect_lesions` and `pretrain` are not rerun. `checkpoints/ssl_pretrained_backbone.pth` is the "Full SSL" backbone.
 
 ---
-
-## Phase 2 — Architecture ablation (11 configs, all 5-fold)
-**Config check:**
-```yaml
-use_sam: False
-use_logit_adjustment: False
-use_drw: False
-class_weight_strategy: "inverse"
-loss_type: "focal"
-use_fda: False
-use_rep_proj: False
-freeze_backbone_stages: 2
-mix_prob: 0.4
-```
+## Phase 2 — Architecture ablation (10 runs; `arch_full` is dropped because it equals `proposed`)
+Train (each command trains all 5 folds):
 ```bash
-# Original 4
 python main.py --mode train --ablation baseline
 python main.py --mode train --ablation msda_only
 python main.py --mode train --ablation hff_only
 python main.py --mode train --ablation proposed
-
-# P3's 7-row architecture ablation — all 5 folds each
-for ablation in arch_baseline arch_msda arch_hff arch_msda_hff arch_attnpool arch_auxhead arch_full; do
-  for fold in 0 1 2 3 4; do
-    python main.py --mode train --ablation $ablation --fold $fold
-  done
-done
+python main.py --mode train --ablation arch_baseline
+python main.py --mode train --ablation arch_msda
+python main.py --mode train --ablation arch_hff
+python main.py --mode train --ablation arch_msda_hff
+python main.py --mode train --ablation arch_attnpool
+python main.py --mode train --ablation arch_auxhead
 ```
-**Wait for ALL of the above to finish, then test everything:**
+Test (after the matching train finished):
 ```bash
 python main.py --mode test --ablation baseline
 python main.py --mode test --ablation msda_only
 python main.py --mode test --ablation hff_only
 python main.py --mode test --ablation proposed
-for ablation in arch_baseline arch_msda arch_hff arch_msda_hff arch_attnpool arch_auxhead arch_full; do
-  python main.py --mode test --ablation $ablation
-done
+python main.py --mode test --ablation arch_baseline
+python main.py --mode test --ablation arch_msda
+python main.py --mode test --ablation arch_hff
+python main.py --mode test --ablation arch_msda_hff
+python main.py --mode test --ablation arch_attnpool
+python main.py --mode test --ablation arch_auxhead
 ```
-`arch_full` and `proposed` share identical flags — their results should
-match closely. A persistent mismatch = pipeline bug to investigate first.
-
-**Also run the `mix_prob` diagnostic here (see `03_ablation_harness.md`
-addendum) to explain the `proposed` P1-regression, in parallel with the
-above (independent, doesn't block anything):**
-```yaml
-mix_prob: 0.1   # then separately try 0.0
-```
+Optional diagnostic for the post-P1 drop of `proposed` (single fold, never reported; compare its log with `proposed` fold 0):
 ```bash
-python main.py --mode train --ablation proposed --fold 0   # diagnostic only, single-fold is fine here — not a result you'll report, just a log comparison
+python main.py --mode train --ablation proposed --tag mix01 --fold 0 --set mix_prob=0.1
+python main.py --mode train --ablation proposed --tag mix00 --fold 0 --set mix_prob=0.0
 ```
-**Revert `mix_prob: 0.4` before continuing to Phase 3** once you've drawn
-a conclusion from the diagnostic log.
-
-→ **STOP. Review all 11 results + the diagnostic log before Phase 3.**
+-> STOP and review Phase 2 results. `proposed` here is the baseline for Phases 3 and 4.
 
 ---
-
-## Phase 3 — Training-strategy (P2) ablation — now ALL 5-FOLD, one flag at a time
-Each step: edit config → train all 5 folds → test (full ensemble) →
-record → next step. Do not skip ahead.
-
-**Step A — Logit Adjustment:**
-```yaml
-use_logit_adjustment: True
-logit_adjustment_tau: 1.0
-```
+## Phase 3 — SSL ablation (all rows use the default recipe, same as `proposed`; "Full SSL" = `proposed` from Phase 2)
+Row "ImageNet pretrain":
 ```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
+python main.py --mode train --ablation proposed --tag ssl_imagenet --set ssl_pretrained_path=null
+python main.py --mode test --ablation proposed --tag ssl_imagenet
 ```
-**Re-do this step** if you previously tested it under the mixed-ensemble
-bug — the number from that run is not trustworthy.
-
-**Step B — + DRW:**
-```yaml
-use_drw: True
-drw_start_frac: 0.6
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
-```
-
-**Step C — + Class-Balanced Loss:**
-```yaml
-class_weight_strategy: "effective_num"
-cb_beta: 0.9999
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
-```
-
-**Step D — LDAM (keep `use_drw: True` from Step B):**
-```yaml
-loss_type: "ldam"
-ldam_max_margin: 0.5
-ldam_scale: 30.0
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
-```
-
-**Step E — Decoupled retraining** (on whichever of A-D won), all 5 folds:
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode decoupled_retrain --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed_decoupled
-```
-
-→ Lock in the best A-E combination for every phase below.
-
----
-
-## Phase 4 — SAM, all 5 folds, on top of the Phase 3 winner
-```yaml
-use_sam: True
-sam_rho: 0.05
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
-```
-→ Keep only if it beats Phase 3's result.
-
----
-
-## Phase 5 — FDA + external validation, all 5 folds
-```yaml
-use_fda: True
-fda_pool_frac: 0.2
-fda_prob: 0.3
-fda_beta: 0.03
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode external_validation --ablation proposed
-```
-**Comparison (FDA off), all 5 folds:**
-```yaml
-use_fda: False
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode external_validation --ablation proposed
-```
-→ Keep whichever gave the better external accuracy.
-
----
-
-## Phase 6 — RepConv/HFF reparameterization, all 5 folds (fresh checkpoints)
-```yaml
-use_rep_proj: True
-```
-```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
-```
-→ Efficiency comparison (params/FLOPs/inference time), accuracy should
-stay similar. Revert to `False` after logging unless keeping it.
-
----
-
-## Phase 7 — EyePACS-supervised SSL row
+Row "EyePACS supervised":
 ```bash
 python main.py --mode pretrain_eyepacs_supervised
+python main.py --mode train --ablation proposed --tag ssl_eyepacs_sup --set ssl_pretrained_path=checkpoints/eyepacs_supervised_backbone.pth
+python main.py --mode test --ablation proposed --tag ssl_eyepacs_sup
 ```
-```yaml
-ssl_pretrained_path: null   # temporary, for the "ImageNet pretrain" comparison row
-```
+Row "Contrastive only" (own save dir, so the resume bug cannot skip training):
 ```bash
-for fold in 0 1 2 3 4; do python main.py --mode train --ablation proposed --fold $fold; done
-python main.py --mode test --ablation proposed
+cp results/ssl_loss_history.npz results/ssl_loss_history_full.npz
+python main.py --mode pretrain --set ssl_use_contrastive=true ssl_use_multitask=false ssl_save_dir=checkpoints/ssl_contrastive_only
+python main.py --mode train --ablation proposed --tag ssl_contrastive --set ssl_pretrained_path=checkpoints/ssl_contrastive_only/ssl_pretrained_backbone.pth
+python main.py --mode test --ablation proposed --tag ssl_contrastive
 ```
-```yaml
-ssl_pretrained_path: "checkpoints/ssl_pretrained_backbone.pth"   # revert immediately after
+Row "Multi-task only":
+```bash
+python main.py --mode pretrain --set ssl_use_contrastive=false ssl_use_multitask=true ssl_save_dir=checkpoints/ssl_multitask_only
+python main.py --mode train --ablation proposed --tag ssl_multitask --set ssl_pretrained_path=checkpoints/ssl_multitask_only/ssl_pretrained_backbone.pth
+python main.py --mode test --ablation proposed --tag ssl_multitask
+cp results/ssl_loss_history_full.npz results/ssl_loss_history.npz
 ```
 
 ---
-
-## Phase 8 — Final tables/charts
+## Phase 4 — Training-strategy ablation (cumulative, on top of `proposed`; run in this order)
 ```bash
+# Step A: Logit Adjustment
+python main.py --mode train --ablation proposed --tag stepA --set use_logit_adjustment=true
+python main.py --mode test --ablation proposed --tag stepA
+
+# Step B: + DRW
+python main.py --mode train --ablation proposed --tag stepB --set use_logit_adjustment=true use_drw=true
+python main.py --mode test --ablation proposed --tag stepB
+
+# Step C: + Class-Balanced Loss
+python main.py --mode train --ablation proposed --tag stepC --set use_logit_adjustment=true use_drw=true class_weight_strategy=effective_num
+python main.py --mode test --ablation proposed --tag stepC
+
+# Step D: LDAM + DRW (no logit adjustment)
+python main.py --mode train --ablation proposed --tag stepD --set loss_type=ldam use_drw=true
+python main.py --mode test --ablation proposed --tag stepD
+```
+If a step made Severe/Proliferative F1 or QWK worse, edit the next step's `--set` to drop that flag.
+Pick the best tag as WINNER (below `stepB` is only an example). Decoupled re-training reuses the winner's saved config automatically:
+```bash
+python main.py --mode decoupled_retrain --ablation proposed --tag stepB
+python main.py --mode test --ablation proposed --tag stepB__decoupled
+```
+If no step beat `proposed`, skip `--inherit` in Phases 5-7 and use plain `--ablation proposed`.
+
+---
+## Phase 5 — SAM (on top of the winner)
+```bash
+python main.py --mode train --ablation proposed --inherit stepB --tag sam --set use_sam=true
+python main.py --mode test --ablation proposed --tag sam
+```
+
+## Phase 6 — FDA + external validation (Messidor-2)
+Replace `stepB` with the best tag so far (`stepB`, `stepB__decoupled`'s base, or `sam`).
+```bash
+python main.py --mode train --ablation proposed --inherit stepB --tag fda --set use_fda=true
+python main.py --mode external_validation --ablation proposed --tag fda
+python main.py --mode external_validation --ablation proposed --tag stepB
+```
+(The last line is the "FDA off" comparison: no retraining needed.) Also run external validation for the final model of each earlier phase you may report, e.g. `--tag sam` or `--tag stepB__decoupled`.
+
+## Phase 7 — RepConv / HFF reparameterization (efficiency row; fresh checkpoints)
+```bash
+python main.py --mode train --ablation proposed --inherit stepB --tag rep --set use_rep_proj=true
+python main.py --mode test --ablation proposed --tag rep
+```
+
+## Phase 8 — Final tables and figures
+1. Edit `configs/tables.yaml`: replace `<WINNER_STEP>` and `<WINNER>` with real run names, set `main_run` to the final model.
+2. Run:
+```bash
+python main.py --mode xai --ablation proposed --tag stepB
 python main.py --mode generate_results
 ```
+(use the final model's tag for `xai`). Outputs: `results/tables/*.csv`, `results/figures/*`.
 
 ---
-
-## Decision point: is P6 (diffusion) needed?
-**See the honest assessment below before starting P6.**
+## Decision point — P6 (diffusion)
+Only after Phases 2-7. Look at QWK, adjacent-grade accuracy, Severe/Proliferative F1 and external accuracy first.
+Raw 5-class accuracy near the ~84.8% APTOS inter-rater level is already close to the label-noise ceiling.
+If a real gap remains, use `plan/06_diffusion_pipeline.md` + `plan/06b_diffusion_pipeline_fix.md`; no earlier run needs retraining.

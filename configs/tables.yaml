@@ -1,0 +1,32 @@
+main_run: proposed                 # run used for confusion matrix / ROC / PR / radar / XAI figures
+architecture:                      # 7-row table (heads switched off progressively)
+  "Baseline": arch_baseline
+  "+MSDA": arch_msda
+  "+HFF": arch_hff
+  "+MSDA+HFF": arch_msda_hff
+  "+AttnPool": arch_attnpool
+  "+AuxHead": arch_auxhead
+  "+Ordinal = Full (Proposed)": proposed
+architecture_heads_on:             # secondary table (AttnPool+Aux+Ordinal always on)
+  "Baseline": baseline
+  "MSDA only": msda_only
+  "HFF only": hff_only
+  "MSDA+HFF (Proposed)": proposed
+ssl:
+  "ImageNet pretrain": proposed__ssl_imagenet
+  "EyePACS supervised": proposed__ssl_eyepacs_sup
+  "Contrastive only": proposed__ssl_contrastive
+  "Multi-task only": proposed__ssl_multitask
+  "Full SSL (Proposed)": proposed
+training:
+  "Baseline (focal + inverse weights)": proposed
+  "+ Logit Adjustment": proposed__stepA
+  "+ DRW": proposed__stepB
+  "+ Class-Balanced Loss": proposed__stepC
+  "LDAM + DRW": proposed__stepD
+  "+ Decoupled re-training": <WINNER_STEP>__decoupled      # e.g. proposed__stepB__decoupled
+  "+ SAM": proposed__sam
+  "+ RepConv (efficiency)": proposed__rep
+external:
+  "Locked config, FDA off": <WINNER>      # e.g. proposed__stepB__decoupled or proposed__sam
+  "Locked config + FDA": proposed__fda

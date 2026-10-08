@@ -48,3 +48,10 @@ def log_diffusion_ablation_result(row_name, metrics, path='results/diffusion_abl
     results = _load_results_dict(path)
     results[row_name] = metrics
     _save_results_dict(path, results)
+
+def log_run(run_name, kind, metrics, path='results/all_runs.npz'):
+    data = _load_results_dict(path)
+    entry = data.get(run_name, {})
+    entry[kind] = metrics
+    data[run_name] = entry
+    _save_results_dict(path, data)

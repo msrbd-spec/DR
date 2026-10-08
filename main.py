@@ -13,7 +13,7 @@ import datetime
 import numpy as np
 
 from src.utils.logger import setup_logger
-from src.utils.paths import get_checkpoint_path, get_log_path
+from src.utils.paths import get_checkpoint_path, get_log_path, make_run_name, parse_overrides
 from src.data.datamodule import get_dataloaders
 from src.models.dr_model import RetiNA_Net
 from src.models.components import OrdinalRegressionHead
@@ -168,7 +168,7 @@ def create_criterion(config, class_weights, device, class_priors=None, cls_num_l
     return criterion
 
 
-def train_single_fold(config, ablation, device, logger, fold_idx=None):
+def train_single_fold(config, ablation, device, logger, fold_idx=None, run_name=None):
     """Train a single fold (or standard train/val split)."""
     train_loader, val_loader, _, _, class_weights, class_priors, cls_num_list = get_dataloaders(config, fold_idx=fold_idx)
 
@@ -176,14 +176,14 @@ def train_single_fold(config, ablation, device, logger, fold_idx=None):
     criterion = create_criterion(config, class_weights, device, class_priors=class_priors, cls_num_list=cls_num_list)
     trainer = DRTrainer(
         model, train_loader, val_loader, criterion, device, config,
-        ablation=ablation, fold_idx=fold_idx
+        ablation=run_name or ablation, fold_idx=fold_idx
     )
 
     train_losses, val_losses, train_accs, val_accs = trainer.train()
     return train_losses, val_losses, train_accs, val_accs
 
 
-def train_kfold(config, ablation, device, logger, timestamp):
+def train_kfold(config, ablation, device, logger, timestamp, run_name=None):
     """Train K-fold cross-validation models."""
     n_folds = config.get("n_folds", 5)
     all_train_losses = []
@@ -196,7 +196,7 @@ def train_kfold(config, ablation, device, logger, timestamp):
         logger.info(f"{'='*60}")
 
         train_losses, val_losses, train_accs, val_accs = train_single_fold(
-            config, ablation, device, logger, fold_idx=fold_idx
+            config, ablation, device, logger, fold_idx=fold_idx, run_name=run_name
         )
 
         all_train_losses.append(train_losses)
@@ -213,7 +213,7 @@ def train_kfold(config, ablation, device, logger, timestamp):
     return all_train_losses, all_val_losses, all_val_accs
 
 
-def run_test(config, ablation, device, logger, timestamp):
+def run_test(config, ablation, device, logger, timestamp, run_name=None):
     """Run test evaluation with optional ensemble."""
     _, _, test_loader, _, _, _, _ = get_dataloaders(config, fold_idx=None)
 
@@ -226,14 +226,16 @@ def run_test(config, ablation, device, logger, timestamp):
     tta_center_crops = config.get("tta_center_crops", [0.9, 0.95])
     ensemble_folds = config.get("ensemble_folds", True)
 
+    run_name = run_name or ablation
     if use_kfold and ensemble_folds:
         # Ensemble inference across K-fold models
-        model_paths = [get_checkpoint_path(ablation, fold=f, create_dir=False) for f in range(n_folds)]
-        model_paths = [p for p in model_paths if os.path.exists(p)]
+        model_paths = [get_checkpoint_path(run_name, fold=f, create_dir=False) for f in range(n_folds)]
+        existing_paths = [p for p in model_paths if os.path.exists(p)]
 
-        if len(model_paths) == 0:
-            logger.error("No fold models found. Please train with K-fold first.")
+        if len(existing_paths) < n_folds:
+            logger.error(f"Expected {n_folds} checkpoints for ensemble, found {len(existing_paths)}. Aborting.")
             return
+        model_paths = existing_paths
 
         logger.info(f"Loading ensemble of {len(model_paths)} fold models...")
 
@@ -269,7 +271,7 @@ def run_test(config, ablation, device, logger, timestamp):
     else:
         # Single model inference
         model = create_model(config, ablation, device)
-        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
+        model_path = get_checkpoint_path(run_name, fold=None, create_dir=False)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
         if hasattr(model, 'fuse_reparam_blocks'):
@@ -311,15 +313,27 @@ def run_test(config, ablation, device, logger, timestamp):
     logger.info(f"Test Metrics - Acc: {metrics['accuracy']:.4f}, Precision: {metrics['precision']:.4f}, Recall: {metrics['recall']:.4f}, F1: {metrics['f1_macro']:.4f}, QWK: {metrics['qwk']:.4f}")
     logger.info(f"Test Classification Report:\n{metrics['classification_report']}")
 
-    from src.evaluation.results_logger import log_architecture_ablation_result
+    from src.evaluation.results_logger import log_architecture_ablation_result, log_run
     from src.evaluation.generate_tables import compute_all_metrics
+    from src.utils.paths import collect_val_metrics
     full_metrics = compute_all_metrics(all_targets, all_preds, y_prob=np.array(all_probs), num_classes=config.get("num_classes", 5))
     log_architecture_ablation_result(ablation, full_metrics)
+
+    full_metrics.update(collect_val_metrics(run_name, n_folds=config.get("n_folds", 5) if use_kfold else 1))
+    log_run(run_name, 'test', full_metrics)
 
     plot_confusion_matrix(all_targets, all_preds, filename=os.path.join('results', f'confusion_matrix_{ablation}_{timestamp}.png'))
     plot_roc_curve(all_targets, np.array(all_probs), filename=os.path.join('results', f'roc_multiclass_{ablation}_{timestamp}.png'))
 
     # Save predictions for later table/chart generation (Phase 8)
+    os.makedirs(os.path.join('results', 'predictions'), exist_ok=True)
+    np.savez(
+        os.path.join('results', 'predictions', f'{run_name}_test.npz'),
+        y_true=np.array(all_targets),
+        y_pred=np.array(all_preds),
+        y_prob=np.array(all_probs),
+        ablation=ablation
+    )
     np.savez(
         os.path.join('results', 'test_predictions.npz'),
         y_true=np.array(all_targets),
@@ -331,7 +345,7 @@ def run_test(config, ablation, device, logger, timestamp):
 
 
 
-def run_external_validation(config, ablation, device, logger, timestamp):
+def run_external_validation(config, ablation, device, logger, timestamp, run_name=None):
     """Run external validation on Messidor-2 with optional ensemble."""
     _, _, _, ext_loader, _, _, _ = get_dataloaders(config, fold_idx=None)
 
@@ -347,14 +361,16 @@ def run_external_validation(config, ablation, device, logger, timestamp):
     tta_rotations = config.get("tta_rotations", True)
     tta_center_crops = config.get("tta_center_crops", [0.9, 0.95])
     ensemble_folds = config.get("ensemble_folds", True)
+    run_name = run_name or ablation
 
     if use_kfold and ensemble_folds:
-        model_paths = [get_checkpoint_path(ablation, fold=f, create_dir=False) for f in range(n_folds)]
-        model_paths = [p for p in model_paths if os.path.exists(p)]
+        model_paths = [get_checkpoint_path(run_name, fold=f, create_dir=False) for f in range(n_folds)]
+        existing_paths = [p for p in model_paths if os.path.exists(p)]
 
-        if len(model_paths) == 0:
-            logger.error("No fold models found. Please train with K-fold first.")
+        if len(existing_paths) < n_folds:
+            logger.error(f"Expected {n_folds} checkpoints for ensemble, found {len(existing_paths)}. Aborting.")
             return
+        model_paths = existing_paths
 
         logger.info(f"Loading ensemble of {len(model_paths)} fold models for external validation...")
 
@@ -388,7 +404,7 @@ def run_external_validation(config, ablation, device, logger, timestamp):
         )
     else:
         model = create_model(config, ablation, device)
-        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
+        model_path = get_checkpoint_path(run_name, fold=None, create_dir=False)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
         if hasattr(model, 'fuse_reparam_blocks'):
@@ -423,9 +439,22 @@ def run_external_validation(config, ablation, device, logger, timestamp):
     logger.info(f"External Validation Metrics - Acc: {metrics['accuracy']:.4f}, Precision: {metrics['precision']:.4f}, Recall: {metrics['recall']:.4f}, F1: {metrics['f1_macro']:.4f}, QWK: {metrics['qwk']:.4f}")
     logger.info(f"External Validation Classification Report:\n{metrics['classification_report']}")
 
+    from src.evaluation.results_logger import log_run
+    from src.evaluation.generate_tables import compute_all_metrics
+    ext_metrics = compute_all_metrics(all_targets, all_preds, y_prob=np.array(all_probs), num_classes=config.get("num_classes", 5))
+    log_run(run_name, 'external', ext_metrics)
+
     plot_confusion_matrix(all_targets, all_preds, filename=os.path.join('results', f'confusion_matrix_external_{ablation}_{timestamp}.png'))
 
     # Save external predictions for later table/chart generation (Phase 8)
+    os.makedirs(os.path.join('results', 'predictions'), exist_ok=True)
+    np.savez(
+        os.path.join('results', 'predictions', f'{run_name}_external.npz'),
+        y_true=np.array(all_targets),
+        y_pred=np.array(all_preds),
+        y_prob=np.array(all_probs),
+        ablation=ablation
+    )
     np.savez(
         os.path.join('results', 'external_predictions.npz'),
         y_true=np.array(all_targets),
@@ -481,18 +510,19 @@ def run_pretrain(config, device, logger, timestamp):
     # Merge SSL config into config for SSLTrainer
     for key, val in ssl_config.items():
         config[key] = val
+    config.update(config.get('_cli_overrides', {}))
 
-    image_dirs = ssl_config.get('ssl_image_dirs', [])
-    lesion_label_dir = ssl_config.get('ssl_lesion_label_dir', 'datasets/EyePACS/lesion_labels')
-    img_size = ssl_config.get('ssl_img_size', 512)
-    mask_size = ssl_config.get('ssl_mask_size', 128)
-    batch_size = ssl_config.get('ssl_batch_size', 32)
-    num_workers = ssl_config.get('ssl_num_workers', 8)
+    image_dirs = config.get('ssl_image_dirs', [])
+    lesion_label_dir = config.get('ssl_lesion_label_dir', 'datasets/EyePACS/lesion_labels')
+    img_size = config.get('ssl_img_size', 512)
+    mask_size = config.get('ssl_mask_size', 128)
+    batch_size = config.get('ssl_batch_size', 32)
+    num_workers = config.get('ssl_num_workers', 8)
 
-    backbone_name = ssl_config.get('ssl_backbone', 'swinv2_large_window12to16_192to256.ms_in22k_ft_in1k')
-    projection_dim = ssl_config.get('ssl_projection_dim', 128)
-    use_contrastive = ssl_config.get('ssl_use_contrastive', True)
-    use_multitask = ssl_config.get('ssl_use_multitask', True)
+    backbone_name = config.get('ssl_backbone', 'swinv2_large_window12to16_192to256.ms_in22k_ft_in1k')
+    projection_dim = config.get('ssl_projection_dim', 128)
+    use_contrastive = config.get('ssl_use_contrastive', True)
+    use_multitask = config.get('ssl_use_multitask', True)
 
     # Create dataloader
     logger.info("Creating SSL dataloader...")
@@ -536,99 +566,98 @@ def run_pretrain(config, device, logger, timestamp):
 def run_generate_results(config, logger, timestamp):
     """
     Phase 8: Generate all tables and charts from saved results.
-    Reads saved test predictions and SSL loss history, then generates:
-      - 6 CSV tables (architecture/SSL/training ablation, per-class, external, SOTA)
-      - 7+ chart types (confusion matrix, ROC, PR, ablation bars, SSL curves, radar, etc.)
-
-    Prerequisites:
-      - Run `--mode test` first (saves results/test_predictions.npz)
-      - Run `--mode pretrain` first (saves results/ssl_loss_history.npz) [optional]
-      - Run `--mode external_validation` first (saves results/external_predictions.npz) [optional]
     """
     logger.info("Generating tables and charts...")
-
     os.makedirs('results/tables', exist_ok=True)
     os.makedirs('results/figures', exist_ok=True)
-
     CLASS_NAMES = ['No DR (0)', 'Mild (1)', 'Moderate (2)', 'Severe (3)', 'Proliferative (4)']
     num_classes = config.get("num_classes", 5)
 
-    # ===================================================================
-    # 1. Load test predictions (from run_test)
-    # ===================================================================
-    pred_path = os.path.join('results', 'test_predictions.npz')
-    y_true, y_pred, y_prob = None, None, None
-    test_ablation = 'proposed'
+    tables_config = yaml.safe_load(open('configs/tables.yaml'))
+    main_run = tables_config.get('main_run', 'proposed')
 
+    from src.evaluation.results_logger import _load_results_dict
+    from src.evaluation.generate_tables import (
+        generate_architecture_ablation_table, generate_ssl_ablation_table,
+        generate_training_ablation_table, generate_external_validation_table,
+        generate_sota_comparison_table, generate_per_class_metrics_table,
+        generate_classification_report_text
+    )
+    all_runs = _load_results_dict('results/all_runs.npz')
+
+    def get_run_metrics(run_name, kind):
+        if run_name not in all_runs or kind not in all_runs[run_name]:
+            logger.warning(f"Missing {kind} metrics for run: {run_name}")
+            return None
+        return all_runs[run_name][kind]
+
+    # Architecture Table
+    arch_results = {}
+    for label, run in tables_config.get('architecture', {}).items():
+        m = get_run_metrics(run, 'test')
+        arch_results[label] = m if m else {}
+    generate_architecture_ablation_table(arch_results, filename='ablation_architecture.csv')
+
+    # Architecture Heads On Table
+    arch_heads_results = {}
+    for label, run in tables_config.get('architecture_heads_on', {}).items():
+        m = get_run_metrics(run, 'test')
+        arch_heads_results[label] = m if m else {}
+    generate_architecture_ablation_table(arch_heads_results, filename='ablation_architecture_heads_on.csv')
+
+    # SSL Table
+    ssl_results = {}
+    for label, run in tables_config.get('ssl', {}).items():
+        m = get_run_metrics(run, 'test')
+        if m:
+            ssl_results[label] = {'val_acc': m.get('val_acc', 0), 'val_qwk': m.get('val_qwk', 0),
+                                  'test_acc': m.get('accuracy', 0), 'test_qwk': m.get('qwk', 0)}
+        else:
+            ssl_results[label] = {}
+    generate_ssl_ablation_table(ssl_results)
+
+    # Training Strategy Table
+    train_results = {}
+    for label, run in tables_config.get('training', {}).items():
+        m = get_run_metrics(run, 'test')
+        if m:
+            train_results[label] = {
+                'test_acc': m.get('accuracy', 0), 'test_qwk': m.get('qwk', 0),
+                'test_f1': m.get('f1_macro', 0), 'test_auc': m.get('auc_macro', 0),
+                'test_f1_class3': m.get('f1_class3', 0), 'test_f1_class4': m.get('f1_class4', 0)
+            }
+        else:
+            train_results[label] = {}
+    generate_training_ablation_table(train_results)
+
+    # External Validation Table
+    ext_results = {}
+    for label, run in tables_config.get('external', {}).items():
+        m = get_run_metrics(run, 'external')
+        if m:
+            ext_results[label] = m
+    if ext_results:
+        generate_external_validation_table(ext_results)
+
+    # Main run predictions (confusion matrix, ROC, PR, radar)
+    pred_path = os.path.join('results', 'predictions', f'{main_run}_test.npz')
+    if not os.path.exists(pred_path):
+        pred_path = os.path.join('results', 'test_predictions.npz')
+    
     if os.path.exists(pred_path):
-        logger.info(f"Loading test predictions from {pred_path}...")
+        logger.info(f"Loading test predictions for {main_run} from {pred_path}...")
         pred_data = np.load(pred_path, allow_pickle=True)
-        y_true = pred_data['y_true']
-        y_pred = pred_data['y_pred']
-        y_prob = pred_data['y_prob']
-        test_ablation = str(pred_data['ablation']) if 'ablation' in pred_data else 'proposed'
-        logger.info(f"  Loaded {len(y_true)} predictions (ablation: {test_ablation})")
-    else:
-        logger.warning(f"No test predictions found at {pred_path}. Run `--mode test` first.")
-        logger.warning("  Tables/charts requiring predictions will be skipped.")
-
-    # ===================================================================
-    # 2. Generate tables from predictions
-    # ===================================================================
-    if y_true is not None and y_prob is not None:
-        logger.info("Generating per-class metrics table...")
-        generate_per_class_metrics_table(
-            y_true, y_pred, y_prob=y_prob,
-            num_classes=num_classes, class_names=CLASS_NAMES
-        )
-
-        logger.info("Generating classification report...")
-        generate_classification_report_text(y_true, y_pred, class_names=CLASS_NAMES)
-
-        # Compute full metrics for architecture ablation table
-        logger.info("Computing full metrics for architecture ablation table...")
-        full_metrics = compute_all_metrics(y_true, y_pred, y_prob=y_prob, num_classes=num_classes)
+        y_true, y_pred, y_prob = pred_data['y_true'], pred_data['y_pred'], pred_data['y_prob']
         
-        from src.evaluation.results_logger import _load_results_dict
-        arch_results = _load_results_dict('results/ablation_results.npz')
-        if test_ablation not in arch_results and full_metrics is not None:
-            arch_results[test_ablation] = full_metrics   # current run, if not already logged
-        if arch_results:
-            generate_architecture_ablation_table(arch_results)
+        generate_per_class_metrics_table(y_true, y_pred, y_prob=y_prob, num_classes=num_classes, class_names=CLASS_NAMES)
+        generate_classification_report_text(y_true, y_pred, class_names=CLASS_NAMES)
+        
+        plot_cm_v2(y_true, y_pred, class_names=CLASS_NAMES, normalize=False, title=f'Confusion Matrix — {main_run}', output_path=os.path.join('results/figures', 'confusion_matrix_raw.png'))
+        plot_cm_v2(y_true, y_pred, class_names=CLASS_NAMES, normalize=True, title=f'Normalized Confusion Matrix — {main_run}', output_path=os.path.join('results/figures', 'confusion_matrix_normalized.png'))
+        plot_roc_curves(y_true, y_prob, num_classes=num_classes, class_names=CLASS_NAMES, output_path=os.path.join('results/figures', 'roc_multiclass.png'))
+        plot_pr_curves(y_true, y_prob, num_classes=num_classes, class_names=CLASS_NAMES, output_path=os.path.join('results/figures', 'pr_curve.png'))
 
-    # ===================================================================
-    # 3. Generate charts from predictions
-    # ===================================================================
-    if y_true is not None:
-        logger.info("Generating confusion matrix (raw)...")
-        plot_cm_v2(
-            y_true, y_pred, class_names=CLASS_NAMES, normalize=False,
-            title=f'Confusion Matrix — {test_ablation}',
-            output_path=os.path.join('results/figures', 'confusion_matrix_raw.png')
-        )
-
-        logger.info("Generating confusion matrix (normalized)...")
-        plot_cm_v2(
-            y_true, y_pred, class_names=CLASS_NAMES, normalize=True,
-            title=f'Normalized Confusion Matrix — {test_ablation}',
-            output_path=os.path.join('results/figures', 'confusion_matrix_normalized.png')
-        )
-
-    if y_true is not None and y_prob is not None:
-        logger.info("Generating ROC curves...")
-        plot_roc_curves(
-            y_true, y_prob, num_classes=num_classes, class_names=CLASS_NAMES,
-            output_path=os.path.join('results/figures', 'roc_multiclass.png')
-        )
-
-        logger.info("Generating Precision-Recall curves...")
-        plot_pr_curves(
-            y_true, y_prob, num_classes=num_classes, class_names=CLASS_NAMES,
-            output_path=os.path.join('results/figures', 'pr_curve.png')
-        )
-
-        # Per-class radar chart
-        logger.info("Generating per-class radar chart...")
+        # Radar chart
         per_class_metrics = {}
         for i, cls_name in enumerate(CLASS_NAMES):
             binary_true = (y_true == i).astype(int)
@@ -641,186 +670,30 @@ def run_generate_results(config, logger, timestamp):
             specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             f1 = 2 * precision * sensitivity / (precision + sensitivity) if (precision + sensitivity) > 0 else 0.0
-            per_class_metrics[cls_name] = {
-                'Sensitivity': sensitivity,
-                'Specificity': specificity,
-                'F1': f1,
-                'Precision': precision,
-            }
-        plot_radar_chart(
-            per_class_metrics, metric_names=['Sensitivity', 'Specificity', 'F1', 'Precision'],
-            class_names=CLASS_NAMES,
-            output_path=os.path.join('results/figures', 'radar_per_class.png')
-        )
+            per_class_metrics[cls_name] = {'Sensitivity': sensitivity, 'Specificity': specificity, 'F1': f1, 'Precision': precision}
+        plot_radar_chart(per_class_metrics, metric_names=['Sensitivity', 'Specificity', 'F1', 'Precision'], class_names=CLASS_NAMES, output_path=os.path.join('results/figures', 'radar_per_class.png'))
 
-    # ===================================================================
-    # 4. Generate SSL pretraining curves (if loss history exists)
-    # ===================================================================
+        # SOTA
+        sota_results = [
+            {'method': 'ResNet50', 'backbone': 'ResNet-50', 'year': '2019', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
+            {'method': 'EfficientNet-B5', 'backbone': 'EfficientNet-B5', 'year': '2019', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
+            {'method': 'SwinV2-Large (ImageNet)', 'backbone': 'SwinV2-L', 'year': '2024', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
+            {'method': 'RetiNA-Net (Proposed)', 'backbone': 'SwinV2-L + SSL', 'year': '2025', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
+        ]
+        from sklearn.metrics import accuracy_score, cohen_kappa_score, roc_auc_score
+        sota_results[-1]['acc'] = accuracy_score(y_true, y_pred) * 100
+        sota_results[-1]['qwk'] = cohen_kappa_score(y_true, y_pred, weights='quadratic')
+        try:
+            sota_results[-1]['auc'] = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
+        except Exception:
+            sota_results[-1]['auc'] = 0.0
+        generate_sota_comparison_table(sota_results)
+
+    # SSL pretraining curves
     ssl_loss_path = os.path.join('results', 'ssl_loss_history.npz')
     if os.path.exists(ssl_loss_path):
-        logger.info("Generating SSL pretraining curves...")
         loss_data = np.load(ssl_loss_path)
-        loss_history = {k: loss_data[k].tolist() for k in loss_data.files}
-        plot_ssl_pretraining_curves(loss_history, output_dir='results/figures')
-    else:
-        logger.info("No SSL loss history found. Skipping SSL curves.")
-
-    # ===================================================================
-    # 5. Generate ablation bar charts from saved CSV tables
-    # ===================================================================
-    arch_csv = os.path.join('results/tables', 'ablation_architecture.csv')
-    if os.path.exists(arch_csv):
-        import pandas as pd
-        df = pd.read_csv(arch_csv)
-        if len(df) > 0:
-            accs = []
-            for val in df['Accuracy (%)']:
-                try:
-                    accs.append(float(val))
-                except (ValueError, TypeError):
-                    accs.append(0.0)
-            highlight_idx = len(accs) - 1
-            plot_ablation_bar_chart(
-                names=df['Model'].tolist(), values=accs,
-                title='Architecture Ablation — Test Accuracy',
-                ylabel='Accuracy (%)',
-                output_path=os.path.join('results/figures', 'ablation_arch_bar.png'),
-                highlight_idx=highlight_idx
-            )
-            logger.info("Generated architecture ablation bar chart.")
-
-    ssl_csv = os.path.join('results/tables', 'ablation_ssl.csv')
-    if os.path.exists(ssl_csv):
-        import pandas as pd
-        df = pd.read_csv(ssl_csv)
-        if len(df) > 0:
-            accs = []
-            for val in df['Test Acc (%)']:
-                try:
-                    accs.append(float(val))
-                except (ValueError, TypeError):
-                    accs.append(0.0)
-            highlight_idx = len(accs) - 1
-            plot_ablation_bar_chart(
-                names=df['Pretraining Method'].tolist(), values=accs,
-                title='SSL Pretraining Ablation — Test Accuracy',
-                ylabel='Accuracy (%)',
-                output_path=os.path.join('results/figures', 'ablation_ssl_bar.png'),
-                highlight_idx=highlight_idx
-            )
-            logger.info("Generated SSL ablation bar chart.")
-
-    train_csv = os.path.join('results/tables', 'ablation_training.csv')
-    if os.path.exists(train_csv):
-        import pandas as pd
-        df = pd.read_csv(train_csv)
-        if len(df) > 0:
-            accs = []
-            for val in df['Test Acc (%)']:
-                try:
-                    accs.append(float(val))
-                except (ValueError, TypeError):
-                    accs.append(0.0)
-            highlight_idx = len(accs) - 1
-            plot_ablation_bar_chart(
-                names=df['Strategy'].tolist(), values=accs,
-                title='Training Strategy Ablation — Test Accuracy',
-                ylabel='Accuracy (%)',
-                output_path=os.path.join('results/figures', 'ablation_training_bar.png'),
-                highlight_idx=highlight_idx
-            )
-            logger.info("Generated training strategy ablation bar chart.")
-
-    # ===================================================================
-    # 6. Load external validation predictions (if available)
-    # ===================================================================
-    ext_pred_path = os.path.join('results', 'external_predictions.npz')
-    if os.path.exists(ext_pred_path):
-        logger.info("Generating external validation table...")
-        ext_data = np.load(ext_pred_path, allow_pickle=True)
-        ext_true = ext_data['y_true']
-        ext_pred = ext_data['y_pred']
-        ext_prob = ext_data['y_prob'] if 'y_prob' in ext_data else None
-        ext_ablation = str(ext_data['ablation']) if 'ablation' in ext_data else 'proposed'
-        ext_metrics = compute_all_metrics(ext_true, ext_pred, y_prob=ext_prob, num_classes=num_classes)
-        ext_results = {ext_ablation: ext_metrics}
-        generate_external_validation_table(ext_results)
-
-        # External validation confusion matrix
-        plot_cm_v2(
-            ext_true, ext_pred, class_names=CLASS_NAMES, normalize=True,
-            title=f'External Validation (Messidor-2) — {ext_ablation}',
-            output_path=os.path.join('results/figures', 'confusion_matrix_external.png')
-        )
-        logger.info("Generated external validation table and confusion matrix.")
-    else:
-        logger.info("No external validation predictions found. Skipping external table.")
-
-    # ===================================================================
-    # 7. Generate SSL ablation table (Table 2)
-    # ===================================================================
-    logger.info("Generating SSL pretraining ablation table (Table 2)...")
-    from src.evaluation.results_logger import _load_results_dict
-    ssl_abl_results = _load_results_dict('results/ssl_ablation_results.npz')
-    if not ssl_abl_results:
-        logger.warning("No SSL ablation results logged yet. Run the SSL "
-                        "ablation sweep (P3) before generate_results for real values.")
-    else:
-        generate_ssl_ablation_table(ssl_abl_results)
-
-    # ===================================================================
-    # Generate Diffusion Ablation Table (if results exist)
-    # ===================================================================
-    diffusion_results = _load_results_dict('results/diffusion_ablation_results.npz')
-    if diffusion_results:
-        from src.evaluation.generate_tables import generate_diffusion_ablation_table
-        generate_diffusion_ablation_table(diffusion_results)
-
-    # ===================================================================
-    # 8. Generate training strategy ablation table (Table 3)
-    # ===================================================================
-    logger.info("Generating training strategy ablation table (Table 3)...")
-    train_ablation_path = os.path.join('results', 'training_ablation_results.npz')
-    if os.path.exists(train_ablation_path):
-        train_abl_data = np.load(train_ablation_path, allow_pickle=True)
-        train_abl_results = {}
-        for key in train_abl_data.files:
-            train_abl_results[key] = train_abl_data[key].item()
-    else:
-        logger.info("  No saved training ablation results found. Generating template with placeholders.")
-        train_abl_results = {
-            'No tricks': {'test_acc': 0.0, 'test_qwk': 0.0, 'test_f1': 0.0, 'test_auc': 0.0},
-            '+EMA': {'test_acc': 0.0, 'test_qwk': 0.0, 'test_f1': 0.0, 'test_auc': 0.0},
-            '+EMA+SWA': {'test_acc': 0.0, 'test_qwk': 0.0, 'test_f1': 0.0, 'test_auc': 0.0},
-            '+TTA': {'test_acc': 0.0, 'test_qwk': 0.0, 'test_f1': 0.0, 'test_auc': 0.0},
-            'Full (Proposed)': {'test_acc': 0.0, 'test_qwk': 0.0, 'test_f1': 0.0, 'test_auc': 0.0},
-        }
-    generate_training_ablation_table(train_abl_results)
-
-    # ===================================================================
-    # 9. Generate SOTA comparison table (Table 4)
-    #    Hardcoded literature values for common DR methods
-    # ===================================================================
-    logger.info("Generating SOTA comparison table (Table 4)...")
-    sota_results = [
-        {'method': 'ResNet50', 'backbone': 'ResNet-50', 'year': '2019', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
-        {'method': 'EfficientNet-B5', 'backbone': 'EfficientNet-B5', 'year': '2019', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
-        {'method': 'SwinV2-Large (ImageNet)', 'backbone': 'SwinV2-L', 'year': '2024', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
-        {'method': 'RetiNA-Net (Proposed)', 'backbone': 'SwinV2-L + SSL', 'year': '2025', 'dataset': 'APTOS-2019', 'acc': 0.0, 'qwk': 0.0, 'auc': 0.0},
-    ]
-    # If we have test predictions, fill in the proposed method's accuracy
-    if y_true is not None:
-        from sklearn.metrics import accuracy_score, cohen_kappa_score, roc_auc_score
-        proposed_acc = accuracy_score(y_true, y_pred) * 100
-        proposed_qwk = cohen_kappa_score(y_true, y_pred, weights='quadratic')
-        try:
-            proposed_auc = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
-        except Exception:
-            proposed_auc = 0.0
-        sota_results[-1]['acc'] = proposed_acc
-        sota_results[-1]['qwk'] = proposed_qwk
-        sota_results[-1]['auc'] = proposed_auc
-    generate_sota_comparison_table(sota_results)
+        plot_ssl_pretraining_curves({k: loss_data[k].tolist() for k in loss_data.files}, output_dir='results/figures')
 
     # ===================================================================
     # 10. Generate lesion correlation chart (Chart 5b)
@@ -873,7 +746,7 @@ def run_generate_results(config, logger, timestamp):
 
 
 
-def run_xai(config, ablation, device, logger, timestamp):
+def run_xai(config, ablation, device, logger, timestamp, run_name=None):
     """
     Generate XAI heatmaps.
     Produces:
@@ -882,12 +755,13 @@ def run_xai(config, ablation, device, logger, timestamp):
     """
     _, _, test_loader, _, _ = get_dataloaders(config, fold_idx=None)
 
+    run_name = run_name or ablation
     model = create_model(config, ablation, device)
 
     # Try to load fold 0 model, fall back to single model
-    model_path = get_checkpoint_path(ablation, fold=0, create_dir=False)
+    model_path = get_checkpoint_path(run_name, fold=0, create_dir=False)
     if not os.path.exists(model_path):
-        model_path = get_checkpoint_path(ablation, fold=None, create_dir=False)
+        model_path = get_checkpoint_path(run_name, fold=None, create_dir=False)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     if hasattr(model, 'fuse_reparam_blocks'):
@@ -983,7 +857,7 @@ def run_xai(config, ablation, device, logger, timestamp):
 
 
 
-def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None):
+def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None, run_name=None):
     """Phase 2: freeze backbone+MSDA+HFF, re-train heads with class-balanced
     sampling for a short schedule. Loads the existing best checkpoint,
     saves to a distinct suffix so the original is never overwritten."""
@@ -992,8 +866,9 @@ def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None):
     train_loader, val_loader, _, _, class_weights, class_priors, cls_num_list = get_dataloaders(
         decoupled_config_loader, fold_idx=fold_idx
     )
+    run_name = run_name or ablation
     model = create_model(config, ablation, device)
-    model_path = get_checkpoint_path(ablation, fold=fold_idx, create_dir=False)
+    model_path = get_checkpoint_path(run_name, fold=fold_idx, create_dir=False)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.freeze_all_except_heads()
 
@@ -1007,7 +882,7 @@ def run_decoupled_retrain(config, ablation, device, logger, fold_idx=None):
     }
     criterion = create_criterion(decoupled_config, class_weights, device, class_priors=class_priors, cls_num_list=cls_num_list)
     trainer = DRTrainer(model, train_loader, val_loader, criterion, device,
-                         decoupled_config, ablation=f"{ablation}_decoupled", fold_idx=fold_idx)
+                         decoupled_config, ablation=f"{run_name}__decoupled", fold_idx=fold_idx)
     trainer.train()
 
 def run_pretrain_eyepacs_supervised(config, device, logger, timestamp):
@@ -1073,26 +948,44 @@ def main():
     parser.add_argument('--config', type=str, default='configs/config.yaml', help="Path to config.yaml")
     parser.add_argument('--fold', type=int, default=None,
                         help="Train only a specific fold (0-indexed). If not specified, trains all folds.")
+    parser.add_argument('--tag', type=str, default='', help='experiment tag; run name = <ablation>__<tag> (no spaces or slashes)')
+    parser.add_argument('--inherit', type=str, default='', help='start from the saved config of run <ablation>__<INHERIT>')
+    parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE', help='config overrides, e.g. --set use_sam=true sam_rho=0.05')
 
     args = parser.parse_args()
 
     config = load_config(args.config)
-
+    run_name = make_run_name(args.ablation, args.tag)
+    EVAL_MODES = {'test', 'external_validation', 'xai', 'decoupled_retrain'}
+    inherit_name = make_run_name(args.ablation, args.inherit) if args.inherit else (run_name if args.mode in EVAL_MODES else None)
+    if inherit_name:
+        snap = os.path.join('checkpoints', inherit_name, 'config_snapshot.yaml')
+        if os.path.exists(snap):
+            config.update(yaml.safe_load(open(snap)))      # restore train-time config (all keys)
+        else:
+            print(f"WARNING: no config snapshot for run '{inherit_name}', using configs/config.yaml")
+    overrides = parse_overrides(args.set)
+    config.update(overrides)
+    config['_cli_overrides'] = overrides                 # re-applied inside run_pretrain after its config merge (W5)
     # Create directories
     os.makedirs('logs', exist_ok=True)
     os.makedirs('results', exist_ok=True)
     os.makedirs('checkpoints', exist_ok=True)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_path = get_log_path(args.mode, args.ablation, timestamp)
+    log_file_path = get_log_path(args.mode, run_name, timestamp)
 
     logger = setup_logger(log_file=log_file_path)
-    logger.info(f"Starting execution in mode: {args.mode}, ablation: {args.ablation}")
+    logger.info(f"Starting execution in mode: {args.mode}, run_name: {run_name}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
 
     if args.mode == 'train':
+        snap_path = get_checkpoint_path(run_name, fold=None, create_dir=True).replace('model.pth', 'config_snapshot.yaml')
+        snap_config = {k: v for k, v in config.items() if k != '_cli_overrides'}
+        yaml.safe_dump(snap_config, open(snap_path, 'w'))
+
         use_kfold = config.get("use_kfold", True)
 
         if use_kfold:
@@ -1100,49 +993,54 @@ def main():
                 # Train single fold
                 logger.info(f"Training single fold: {args.fold}")
                 train_losses, val_losses, train_accs, val_accs = train_single_fold(
-                    config, args.ablation, device, logger, fold_idx=args.fold
+                    config, args.ablation, device, logger, fold_idx=args.fold, run_name=run_name
                 )
                 plot_training_curves(
                     train_losses, val_losses, train_accs, val_accs,
-                    filename=os.path.join('results', f'training_curves_{args.ablation}_fold{args.fold}_{timestamp}.png')
+                    filename=os.path.join('results', f'training_curves_{run_name}_fold{args.fold}_{timestamp}.png')
                 )
             else:
                 # Train all folds
-                train_kfold(config, args.ablation, device, logger, timestamp)
+                train_kfold(config, args.ablation, device, logger, timestamp, run_name=run_name)
         else:
             # Standard train/val split
             train_losses, val_losses, train_accs, val_accs = train_single_fold(
-                config, args.ablation, device, logger, fold_idx=None
+                config, args.ablation, device, logger, fold_idx=None, run_name=run_name
             )
             plot_training_curves(
                 train_losses, val_losses, train_accs, val_accs,
-                filename=os.path.join('results', f'training_curves_{args.ablation}_{timestamp}.png')
+                filename=os.path.join('results', f'training_curves_{run_name}_{timestamp}.png')
             )
 
         logger.info("Training complete.")
 
     elif args.mode == 'decoupled_retrain':
+        decoupled_run_name = f"{run_name}__decoupled"
+        snap_path = get_checkpoint_path(decoupled_run_name, fold=None, create_dir=True).replace('model.pth', 'config_snapshot.yaml')
+        snap_config = {k: v for k, v in config.items() if k != '_cli_overrides'}
+        yaml.safe_dump(snap_config, open(snap_path, 'w'))
+
         use_kfold = config.get("use_kfold", True)
         if use_kfold:
             if args.fold is not None:
                 logger.info(f"Decoupled retrain single fold: {args.fold}")
-                run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=args.fold)
+                run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=args.fold, run_name=run_name)
             else:
                 n_folds = config.get("n_folds", 5)
                 for fold_idx in range(n_folds):
                     logger.info(f"\n{'='*60}\nDecoupled retrain Fold {fold_idx + 1}/{n_folds}\n{'='*60}")
-                    run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=fold_idx)
+                    run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=fold_idx, run_name=run_name)
         else:
-            run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=None)
+            run_decoupled_retrain(config, args.ablation, device, logger, fold_idx=None, run_name=run_name)
 
     elif args.mode == 'test':
-        run_test(config, args.ablation, device, logger, timestamp)
+        run_test(config, args.ablation, device, logger, timestamp, run_name=run_name)
 
     elif args.mode == 'external_validation':
-        run_external_validation(config, args.ablation, device, logger, timestamp)
+        run_external_validation(config, args.ablation, device, logger, timestamp, run_name=run_name)
 
     elif args.mode == 'xai':
-        run_xai(config, args.ablation, device, logger, timestamp)
+        run_xai(config, args.ablation, device, logger, timestamp, run_name=run_name)
 
     elif args.mode == 'detect_lesions':
         run_detect_lesions(config, logger, timestamp)
